@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,7 +35,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
@@ -76,14 +76,30 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val sharedText = intent?.takeIf { it.action == Intent.ACTION_SEND }
-            ?.getStringExtra(Intent.EXTRA_TEXT)
-            .orEmpty()
-
-        setContent {
-            EasyDownloadApp(initialText = sharedText)
+        val sharedText = when (intent?.action) {
+            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty()
+            else -> intent?.getStringExtra(EXTRA_PARSE_TEXT).orEmpty()
         }
+        setContent { EasyDownloadApp(initialText = sharedText) }
     }
+}
+
+data class MediaCandidate(
+    val url: String,
+    val type: MediaType,
+    val source: String,
+    val fileName: String
+)
+
+enum class MediaType(val label: String) {
+    Video("视频"),
+    Image("图片"),
+    Audio("音频"),
+    Playlist("列表"),
+    Web("网页"),
+    File("文件"),
+    Unknown("未知")
 }
 
 private data class ParsedPage(
@@ -91,7 +107,8 @@ private data class ParsedPage(
     val finalUrl: String,
     val title: String,
     val description: String,
-    val candidates: List<String>,
+    val contentType: String,
+    val candidates: List<MediaCandidate>,
     val error: String? = null
 )
 
@@ -101,6 +118,14 @@ private data class DownloadRow(
     val status: String,
     val reason: String,
     val uri: String
+)
+
+private data class UpdateInfo(
+    val latestVersion: String,
+    val pageUrl: String,
+    val apkUrl: String,
+    val hasUpdate: Boolean,
+    val error: String? = null
 )
 
 private val AppColors = lightColorScheme(
@@ -148,12 +173,9 @@ private fun HomeScreen(initialText: String) {
     var input by remember { mutableStateOf(initialText) }
     var busy by remember { mutableStateOf(false) }
     var parsed by remember { mutableStateOf<ParsedPage?>(null) }
-    var message by remember { mutableStateOf("") }
 
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
@@ -167,9 +189,7 @@ private fun HomeScreen(initialText: String) {
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(150.dp),
+                    modifier = Modifier.fillMaxWidth().height(150.dp),
                     label = { Text("粘贴分享文本或网页链接") },
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
                     minLines = 5
@@ -180,7 +200,6 @@ private fun HomeScreen(initialText: String) {
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            message = ""
                             scope.launch {
                                 parsed = parsePage(input)
                                 busy = false
@@ -189,20 +208,12 @@ private fun HomeScreen(initialText: String) {
                     ) { Text(if (busy) "解析中" else "解析") }
                     OutlinedButton(onClick = {
                         val first = extractFirstUrl(input)
-                        if (first == null) {
-                            toast(context, "没有找到链接")
-                        } else {
-                            enqueueDownload(context, first)
-                        }
+                        if (first == null) toast(context, "没有找到链接") else enqueueDownload(context, first, null)
                     }) { Text("直接下载") }
                     TextButton(onClick = {
                         input = ""
                         parsed = null
                     }) { Text("清空") }
-                }
-                if (message.isNotBlank()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(message, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -216,6 +227,7 @@ private fun HomeScreen(initialText: String) {
                     } else {
                         ResultLine("原始链接", page.inputUrl)
                         ResultLine("跳转后", page.finalUrl)
+                        ResultLine("页面类型", page.contentType.ifBlank { "未识别" })
                         ResultLine("标题", page.title.ifBlank { "未识别" })
                         ResultLine("描述", page.description.ifBlank { "未识别" })
                     }
@@ -223,16 +235,26 @@ private fun HomeScreen(initialText: String) {
             }
             if (page.candidates.isNotEmpty()) {
                 item {
-                    Text("候选资源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    val counts = page.candidates.groupingBy { it.type }.eachCount()
+                    SectionCard {
+                        Text("识别结果", fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            counts.entries.joinToString("  ") { "${it.key.label} ${it.value}" }
+                                .ifBlank { "没有识别到媒体资源" },
+                            color = Color(0xFF667085)
+                        )
+                    }
                 }
-                items(page.candidates) { url ->
+                items(page.candidates) { candidate ->
                     CandidateRow(
-                        url = url,
+                        candidate = candidate,
                         onCopy = {
-                            copyText(context, url)
+                            copyText(context, candidate.url)
                             toast(context, "已复制")
                         },
-                        onDownload = { enqueueDownload(context, url) }
+                        onDownload = { enqueueDownload(context, candidate.url, candidate.fileName) },
+                        onOpen = { openUrl(context, candidate.url) }
                     )
                 }
             }
@@ -241,7 +263,7 @@ private fun HomeScreen(initialText: String) {
             SectionCard {
                 Text("本地版说明", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("无广告、无登录、无付费入口。解析只读取公开网页内容，下载交给系统下载器处理。")
+                Text("无广告、无登录、无付费入口。解析会尽量标出视频、图片、音频、m3u8 列表和普通网页。")
             }
             Spacer(Modifier.height(18.dp))
         }
@@ -261,9 +283,7 @@ private fun DownloadScreen() {
     LaunchedEffect(Unit) { refresh() }
 
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
+        modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
@@ -313,13 +333,22 @@ private fun ToolsScreen() {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("本地工具", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        SectionCard {
+            Text("悬浮窗", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text("开启后会显示一个小浮窗，可从任何界面快速打开解析器或读取剪贴板文本。", color = Color(0xFF667085))
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = { startFloatingWindow(context) }) { Text("开启") }
+                OutlinedButton(onClick = { context.stopService(Intent(context, FloatingWindowService::class.java)) }) {
+                    Text("关闭")
+                }
+            }
+        }
         SectionCard {
             Text("文件校验", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
@@ -329,11 +358,11 @@ private fun ToolsScreen() {
         }
         ToolGrid(
             listOf(
-                "短链解析" to "解析跳转、标题和候选资源",
+                "短链解析" to "解析跳转、标题、描述和候选资源",
+                "媒体识别" to "按视频、图片、音频、列表和网页分类",
+                "悬浮窗" to "复制链接后快速唤起解析器",
                 "系统下载" to "调用系统下载器保存文件",
                 "文件哈希" to "计算 MD5 与 SHA-256",
-                "下载目录" to "快速打开系统下载位置",
-                "文本清理" to "从分享文案中抽取链接",
                 "本地优先" to "不含广告 SDK 和支付 SDK"
             )
         )
@@ -343,24 +372,57 @@ private fun ToolsScreen() {
 @Composable
 private fun MineScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            Text("版本 1.21")
-            Text("本地解析、本地下载、无订阅、无广告。")
+            Text("版本 1.22")
+            Text("本地解析、本地下载、媒体类型识别、悬浮窗，无订阅、无广告。")
         }
         SectionCard {
             Text("隐私", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text("应用不会收集账号信息，不集成广告 ID，不包含支付入口。网络请求仅由你输入的链接触发。")
+        }
+        SectionCard {
+            Text("检查更新", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text("当前版本：1.22", color = Color(0xFF667085))
+            updateInfo?.let { info ->
+                Spacer(Modifier.height(6.dp))
+                when {
+                    info.error != null -> Text("检查失败：${info.error}", color = Color(0xFFC62828))
+                    info.hasUpdate -> Text("发现新版本：${info.latestVersion}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    else -> Text("已是最新版本：${info.latestVersion}", color = Color(0xFF667085))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    enabled = !checking,
+                    onClick = {
+                        checking = true
+                        scope.launch {
+                            updateInfo = checkForUpdates()
+                            checking = false
+                        }
+                    }
+                ) { Text(if (checking) "检查中" else "检查更新") }
+                val info = updateInfo
+                if (info?.hasUpdate == true) {
+                    OutlinedButton(onClick = { openUrl(context, info.apkUrl.ifBlank { info.pageUrl }) }) {
+                        Text("下载更新")
+                    }
+                }
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = { openDownloads(context) }) { Text("下载目录") }
@@ -371,11 +433,7 @@ private fun MineScreen() {
 
 @Composable
 private fun HeaderBlock() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.Transparent)
-    ) {
+    Column(modifier = Modifier.fillMaxWidth().background(Color.Transparent)) {
         Text("便捷下载", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text("本地版", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -405,14 +463,47 @@ private fun ResultLine(label: String, value: String) {
 }
 
 @Composable
-private fun CandidateRow(url: String, onCopy: () -> Unit, onDownload: () -> Unit) {
+private fun CandidateRow(
+    candidate: MediaCandidate,
+    onCopy: () -> Unit,
+    onDownload: () -> Unit,
+    onOpen: () -> Unit
+) {
     SectionCard {
-        Text(url, color = MaterialTheme.colorScheme.secondary)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TypeBadge(candidate.type)
+            Spacer(Modifier.width(8.dp))
+            Text(candidate.source, color = Color(0xFF667085))
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(candidate.fileName, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(candidate.url, color = MaterialTheme.colorScheme.secondary)
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(onClick = onDownload) { Text("下载") }
             OutlinedButton(onClick = onCopy) { Text("复制") }
+            OutlinedButton(onClick = onOpen) { Text("打开") }
         }
+    }
+}
+
+@Composable
+private fun TypeBadge(type: MediaType) {
+    val color = when (type) {
+        MediaType.Video -> Color(0xFF1565C0)
+        MediaType.Image -> Color(0xFF2E7D32)
+        MediaType.Audio -> Color(0xFF6A1B9A)
+        MediaType.Playlist -> Color(0xFFEF6C00)
+        MediaType.Web -> Color(0xFF455A64)
+        MediaType.File -> Color(0xFF5D4037)
+        MediaType.Unknown -> Color(0xFF757575)
+    }
+    Box(
+        modifier = Modifier.background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(type.label, color = color, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -422,9 +513,7 @@ private fun ToolGrid(items: List<Pair<String, String>>) {
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+                    modifier = Modifier.size(34.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -442,7 +531,7 @@ private fun ToolGrid(items: List<Pair<String, String>>) {
 private suspend fun parsePage(input: String): ParsedPage = withContext(Dispatchers.IO) {
     val url = extractFirstUrl(input)
     if (url == null) {
-        return@withContext ParsedPage("", "", "", "", emptyList(), "没有找到 http/https 链接")
+        return@withContext ParsedPage("", "", "", "", "", emptyList(), "没有找到 http/https 链接")
     }
     try {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -455,35 +544,30 @@ private suspend fun parsePage(input: String): ParsedPage = withContext(Dispatche
         }
         val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         val finalUrl = connection.url.toString()
+        val contentType = connection.contentType.orEmpty()
+        val candidates = buildCandidates(html, finalUrl, contentType)
         ParsedPage(
             inputUrl = url,
             finalUrl = finalUrl,
             title = htmlTitle(html),
             description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") },
-            candidates = candidateUrls(html, finalUrl)
+            contentType = contentType.ifBlank { classifyUrl(finalUrl, "").label },
+            candidates = candidates
         )
     } catch (e: Exception) {
-        ParsedPage(url, url, "", "", emptyList(), e.message ?: "网络请求失败")
+        ParsedPage(url, url, "", "", "", emptyList(), e.message ?: "网络请求失败")
     }
 }
 
-private fun extractFirstUrl(text: String): String? {
-    return Regex("""https?://[^\s"'<>]+""")
-        .find(text)
-        ?.value
-        ?.trimEnd('.', ',', ';', ')', ']', '}')
+fun extractFirstUrl(text: String): String? {
+    return Regex("""https?://[^\s"'<>]+""").find(text)?.value?.trimEnd('.', ',', ';', ')', ']', '}')
 }
 
 private fun htmlTitle(html: String): String {
     val og = metaContent(html, "og:title")
     if (og.isNotBlank()) return og
     return Regex("""<title[^>]*>(.*?)</title>""", RegexOption.IGNORE_CASE)
-        .find(html)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.replace(Regex("""\s+"""), " ")
-        ?.trim()
-        .orEmpty()
+        .find(html)?.groupValues?.getOrNull(1)?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
 }
 
 private fun metaContent(html: String, name: String): String {
@@ -492,44 +576,96 @@ private fun metaContent(html: String, name: String): String {
         Regex("""<meta\s+(?:property|name)=["']$escaped["']\s+content=["']([^"']+)["'][^>]*>""", RegexOption.IGNORE_CASE),
         Regex("""<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']$escaped["'][^>]*>""", RegexOption.IGNORE_CASE)
     )
-    return patterns.firstNotNullOfOrNull { it.find(html)?.groupValues?.getOrNull(1) }
-        ?.htmlDecode()
-        .orEmpty()
+    return patterns.firstNotNullOfOrNull { it.find(html)?.groupValues?.getOrNull(1) }?.htmlDecode().orEmpty()
 }
 
-private fun candidateUrls(html: String, finalUrl: String): List<String> {
-    val hostTerms = listOf("douyin", "snssdk", "byteimg", "douyinvod", "ixigua", "pstatp", "amemv", "bilibili", "kuaishou")
-    val values = mutableListOf<String>()
+private fun buildCandidates(html: String, finalUrl: String, contentType: String): List<MediaCandidate> {
+    val values = linkedMapOf<String, String>()
+
+    listOf(
+        "og:video" to "页面视频",
+        "og:video:url" to "页面视频",
+        "og:video:secure_url" to "页面视频",
+        "twitter:player:stream" to "页面视频",
+        "og:image" to "页面图片",
+        "og:image:url" to "页面图片",
+        "twitter:image" to "页面图片",
+        "og:audio" to "页面音频"
+    ).forEach { (name, source) ->
+        metaContent(html, name).takeIf { it.startsWith("http") }?.let { values[it.unescapeUrl()] = source }
+    }
+
+    Regex("""(?:src|href|url|play_addr|download_addr|cover|origin_cover|dynamic_cover)["'\s:=]+(?:\[)?["']?(https?:\\?/\\?/[^"'\]\s<>]+|https?://[^"'\]\s<>]+)""", RegexOption.IGNORE_CASE)
+        .findAll(html)
+        .forEach { values[it.groupValues[1].unescapeUrl()] = "页面资源" }
+
     Regex("""https?:\\?/\\?/[^"' <>\n\r]+|https?://[^"' <>\n\r]+""", RegexOption.IGNORE_CASE)
         .findAll(html)
         .map { it.value.unescapeUrl() }
-        .forEach { found ->
-            if (hostTerms.any { found.contains(it, ignoreCase = true) } && found !in values) {
-                values += found
-            }
+        .filter { shouldKeepCandidate(it) }
+        .forEach { values.putIfAbsent(it, "页面链接") }
+
+    values.putIfAbsent(finalUrl, "跳转目标")
+
+    return values.entries
+        .map { (url, source) ->
+            MediaCandidate(
+                url = url,
+                type = classifyUrl(url, if (url == finalUrl) contentType else ""),
+                source = source,
+                fileName = fileNameFor(url)
+            )
         }
-    if (finalUrl !in values) values.add(0, finalUrl)
-    return values.take(40)
+        .distinctBy { it.url }
+        .sortedBy { typeRank(it.type) }
+        .take(80)
 }
 
-private fun String.unescapeUrl(): String {
-    return replace("\\u0026", "&")
-        .replace("\\/", "/")
-        .replace("&amp;", "&")
+private fun shouldKeepCandidate(url: String): Boolean {
+    val terms = listOf("douyin", "snssdk", "byteimg", "douyinvod", "ixigua", "pstatp", "amemv", "bilibili", "kuaishou", "m3u8", ".mp4", ".jpg", ".jpeg", ".png", ".webp", ".mp3", ".aac")
+    return terms.any { url.contains(it, ignoreCase = true) }
 }
+
+fun classifyUrl(url: String, mime: String): MediaType {
+    val lower = Uri.decode(url).lowercase(Locale.US).substringBefore("?")
+    val lowerMime = mime.lowercase(Locale.US)
+    return when {
+        lowerMime.startsWith("video/") || lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".mkv") || lower.endsWith(".webm") -> MediaType.Video
+        lower.endsWith(".m3u8") || lower.endsWith(".mpd") -> MediaType.Playlist
+        lowerMime.startsWith("image/") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif") -> MediaType.Image
+        lowerMime.startsWith("audio/") || lower.endsWith(".mp3") || lower.endsWith(".aac") || lower.endsWith(".m4a") || lower.endsWith(".wav") || lower.endsWith(".flac") -> MediaType.Audio
+        lowerMime.startsWith("text/html") || lower.contains("/share/") || lower.contains("v.douyin.com") -> MediaType.Web
+        lower.substringAfterLast('.', "").length in 2..5 -> MediaType.File
+        else -> MediaType.Unknown
+    }
+}
+
+private fun typeRank(type: MediaType): Int = when (type) {
+    MediaType.Video -> 0
+    MediaType.Playlist -> 1
+    MediaType.Image -> 2
+    MediaType.Audio -> 3
+    MediaType.File -> 4
+    MediaType.Web -> 5
+    MediaType.Unknown -> 6
+}
+
+private fun fileNameFor(url: String): String {
+    val decoded = runCatching { Uri.decode(url) }.getOrElse { url }
+    val last = decoded.substringBefore("?").trimEnd('/').substringAfterLast('/')
+    return last.takeIf { it.isNotBlank() && it.length < 100 } ?: "resource-${System.currentTimeMillis()}"
+}
+
+private fun String.unescapeUrl(): String = replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
 
 private fun String.htmlDecode(): String {
-    return replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+    return replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
 }
 
-private fun enqueueDownload(context: Context, url: String) {
+private fun enqueueDownload(context: Context, url: String, preferredName: String?) {
     try {
         val uri = Uri.parse(url)
-        val name = uri.lastPathSegment?.takeIf { it.isNotBlank() } ?: "download-${System.currentTimeMillis()}"
+        val name = preferredName?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "download-${System.currentTimeMillis()}"
         val request = DownloadManager.Request(uri)
             .setTitle(name)
             .setDescription(url)
@@ -537,8 +673,7 @@ private fun enqueueDownload(context: Context, url: String) {
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name.safeFileName())
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(true)
-        val manager = context.getSystemService(DownloadManager::class.java)
-        manager.enqueue(request)
+        context.getSystemService(DownloadManager::class.java).enqueue(request)
         toast(context, "已加入下载任务")
     } catch (e: Exception) {
         toast(context, e.message ?: "无法下载")
@@ -547,9 +682,8 @@ private fun enqueueDownload(context: Context, url: String) {
 
 private fun queryDownloads(context: Context): List<DownloadRow> {
     val manager = context.getSystemService(DownloadManager::class.java)
-    val query = DownloadManager.Query()
     val rows = mutableListOf<DownloadRow>()
-    manager.query(query)?.use { cursor ->
+    manager.query(DownloadManager.Query())?.use { cursor ->
         val idCol = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
         val titleCol = cursor.getColumnIndex(DownloadManager.COLUMN_TITLE)
         val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
@@ -590,15 +724,48 @@ private suspend fun fileHashReport(context: Context, uri: Uri): String = withCon
     "文件：$name\nMD5：${md5.digest().hex()}\nSHA-256：${sha.digest().hex()}"
 }
 
-private fun Int.label(): String {
-    return when (this) {
-        DownloadManager.STATUS_PENDING -> "等待中"
-        DownloadManager.STATUS_RUNNING -> "下载中"
-        DownloadManager.STATUS_PAUSED -> "已暂停"
-        DownloadManager.STATUS_SUCCESSFUL -> "已完成"
-        DownloadManager.STATUS_FAILED -> "失败"
-        else -> "未知"
+private suspend fun checkForUpdates(): UpdateInfo = withContext(Dispatchers.IO) {
+    try {
+        val connection = (URL("https://api.github.com/repos/7116-byte/EasyDownloadLocal/releases/latest").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 12000
+            readTimeout = 15000
+            requestMethod = "GET"
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", "EasyDownloadLocal/$CURRENT_VERSION_NAME")
+        }
+        val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val tag = Regex(""""tag_name"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
+        val pageUrl = Regex(""""html_url"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
+        val apkUrl = Regex(""""browser_download_url"\s*:\s*"([^"]*\.apk)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
+        val latestCode = versionCodeFromTag(tag)
+        UpdateInfo(
+            latestVersion = tag.ifBlank { "未知" },
+            pageUrl = pageUrl,
+            apkUrl = apkUrl,
+            hasUpdate = latestCode > CURRENT_VERSION_CODE
+        )
+    } catch (e: Exception) {
+        UpdateInfo("", "", "", false, e.message ?: "无法连接 GitHub")
     }
+}
+
+private fun versionCodeFromTag(tag: String): Int {
+    val clean = tag.trim().removePrefix("v")
+    val parts = clean.split(".").mapNotNull { it.toIntOrNull() }
+    if (parts.isEmpty()) return 0
+    val major = parts.getOrElse(0) { 0 }
+    val minor = parts.getOrElse(1) { 0 }
+    val patch = parts.getOrElse(2) { 0 }
+    return major * 10000 + minor * 100 + patch
+}
+
+private fun Int.label(): String = when (this) {
+    DownloadManager.STATUS_PENDING -> "等待中"
+    DownloadManager.STATUS_RUNNING -> "下载中"
+    DownloadManager.STATUS_PAUSED -> "已暂停"
+    DownloadManager.STATUS_SUCCESSFUL -> "已完成"
+    DownloadManager.STATUS_FAILED -> "失败"
+    else -> "未知"
 }
 
 private fun Int.reasonLabel(status: Int): String {
@@ -620,33 +787,56 @@ private fun Int.reasonLabel(status: Int): String {
 private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
 
 private fun String.safeFileName(): String {
-    val cleaned = replace(Regex("""[\\/:*?"<>|]"""), "_").take(80)
-    return cleaned.ifBlank {
+    return replace(Regex("""[\\/:*?"<>|]"""), "_").take(80).ifBlank {
         SimpleDateFormat("'download-'yyyyMMdd-HHmmss", Locale.US).format(Date())
     }
 }
 
+private fun startFloatingWindow(context: Context) {
+    if (!Settings.canDrawOverlays(context)) {
+        val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
+        context.startActivity(intent)
+        toast(context, "请先允许悬浮窗权限")
+        return
+    }
+    context.startService(Intent(context, FloatingWindowService::class.java))
+    toast(context, "悬浮窗已开启")
+}
+
 private fun copyText(context: Context, text: String) {
-    val manager = context.getSystemService(ClipboardManager::class.java)
-    manager.setPrimaryClip(ClipData.newPlainText("link", text))
+    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("link", text))
+}
+
+private fun openUrl(context: Context, url: String) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        .onFailure { toast(context, "无法打开链接") }
 }
 
 private fun openDownloads(context: Context) {
     val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(intent) }
-        .onFailure { toast(context, "无法打开下载目录") }
+    runCatching { context.startActivity(intent) }.onFailure { toast(context, "无法打开下载目录") }
 }
 
 private fun shareAppText(context: Context) {
     val intent = Intent(Intent.ACTION_SEND)
         .setType("text/plain")
-        .putExtra(Intent.EXTRA_TEXT, "便捷下载本地版：无广告、无登录、无付费入口。")
+        .putExtra(Intent.EXTRA_TEXT, "便捷下载本地版：无广告、无登录、无付费入口，支持媒体类型识别和悬浮窗。")
     context.startActivity(Intent.createChooser(intent, "分享"))
+}
+
+fun parseIntentForText(context: Context): String {
+    val clip = context.getSystemService(ClipboardManager::class.java).primaryClip
+    return clip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
 }
 
 private fun toast(context: Context, text: String) {
     Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 }
+
+const val EXTRA_PARSE_TEXT = "com.local.easydownload.PARSE_TEXT"
+
+private const val CURRENT_VERSION_NAME = "1.22"
+private const val CURRENT_VERSION_CODE = 10202
 
 private const val MOBILE_UA =
     "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
