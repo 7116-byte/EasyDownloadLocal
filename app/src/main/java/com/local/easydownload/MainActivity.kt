@@ -8,14 +8,12 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
-import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +27,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +38,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -65,10 +67,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedInputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -76,48 +76,50 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val sharedText = when (intent?.action) {
+        val initialText = when (intent?.action) {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
             Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString().orEmpty()
             else -> intent?.getStringExtra(EXTRA_PARSE_TEXT).orEmpty()
         }
-        setContent { EasyDownloadApp(initialText = sharedText) }
+        setContent { EasyDownloadApp(initialText) }
     }
 }
-
-data class MediaCandidate(
-    val url: String,
-    val type: MediaType,
-    val source: String,
-    val fileName: String
-)
 
 enum class MediaType(val label: String) {
     Video("视频"),
     Image("图片"),
+    Gif("GIF"),
     Audio("音频"),
     Playlist("列表"),
     Web("网页"),
     File("文件"),
-    Unknown("未知")
+    Other("其他")
 }
 
-private data class ParsedPage(
+data class MediaItem(
+    val url: String,
+    val type: MediaType,
+    val title: String = "",
+    val coverUrl: String = "",
+    val size: String = "",
+    val source: String = "",
+    val selected: Boolean = true,
+    val localPath: String = "",
+    val status: String = "待下载",
+    val progress: Int = 0,
+    val speed: String = ""
+) {
+    val fileName: String
+        get() = fileNameFor(url, type)
+}
+
+private data class ParsedResult(
     val inputUrl: String,
     val finalUrl: String,
     val title: String,
     val description: String,
-    val contentType: String,
-    val candidates: List<MediaCandidate>,
+    val items: List<MediaItem>,
     val error: String? = null
-)
-
-private data class DownloadRow(
-    val id: Long,
-    val title: String,
-    val status: String,
-    val reason: String,
-    val uri: String
 )
 
 private data class UpdateInfo(
@@ -133,8 +135,7 @@ private val AppColors = lightColorScheme(
     secondary = Color(0xFF1565C0),
     background = Color(0xFFF7F8FA),
     surface = Color.White,
-    onPrimary = Color.White,
-    onSecondary = Color.White
+    onPrimary = Color.White
 )
 
 @Composable
@@ -142,22 +143,24 @@ private fun EasyDownloadApp(initialText: String) {
     MaterialTheme(colorScheme = AppColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             var tab by remember { mutableStateOf(0) }
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(modifier = Modifier.weight(1f)) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f)) {
                     when (tab) {
-                        0 -> HomeScreen(initialText)
-                        1 -> DownloadScreen()
-                        2 -> ToolsScreen()
+                        0 -> DownloadStartScreen(initialText)
+                        1 -> DownloadTaskScreen()
+                        2 -> ToolScreen()
                         else -> MineScreen()
                     }
                 }
                 NavigationBar(containerColor = Color.White) {
-                    listOf("首页", "任务", "工具", "我的").forEachIndexed { index, title ->
+                    val labels = listOf("首页", "任务", "工具", "我的")
+                    val icons = listOf("↓", "≡", "□", "我")
+                    labels.forEachIndexed { index, label ->
                         NavigationBarItem(
                             selected = tab == index,
                             onClick = { tab = index },
-                            icon = { Text(listOf("↓", "≡", "◇", "我")[index]) },
-                            label = { Text(title) }
+                            icon = { Text(icons[index]) },
+                            label = { Text(label) }
                         )
                     }
                 }
@@ -167,203 +170,278 @@ private fun EasyDownloadApp(initialText: String) {
 }
 
 @Composable
-private fun HomeScreen(initialText: String) {
+private fun DownloadStartScreen(initialText: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var input by remember { mutableStateOf(initialText) }
-    var busy by remember { mutableStateOf(false) }
-    var parsed by remember { mutableStateOf<ParsedPage?>(null) }
+    var includeImage by remember { mutableStateOf(true) }
+    var includeVideo by remember { mutableStateOf(true) }
+    var includeAudio by remember { mutableStateOf(false) }
+    var parsing by remember { mutableStateOf(false) }
+    var parsed by remember { mutableStateOf<ParsedResult?>(null) }
+    val selectedItems = remember { mutableStateListOf<MediaItem>() }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(18.dp))
-            HeaderBlock()
+            Spacer(Modifier.height(14.dp))
+            Text("便捷下载", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("本地版", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
         item {
             SectionCard {
-                Text("链接解析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("粘贴要下载的平台链接", fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { openSupportList(context) }) { Text("支持列表") }
+                }
+                Text("先做平台解析，资源不完整时可用任意门嗅探网页请求。", color = Color(0xFF667085))
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    modifier = Modifier.fillMaxWidth().height(150.dp),
-                    label = { Text("粘贴分享文本或网页链接") },
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-                    minLines = 5
+                    modifier = Modifier.fillMaxWidth().height(128.dp),
+                    label = { Text("分享文案或链接") },
+                    minLines = 4,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None)
                 )
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LabeledCheckBox("图片", includeImage) { includeImage = it }
+                    LabeledCheckBox("视频", includeVideo) { includeVideo = it }
+                    LabeledCheckBox("音频", includeAudio) { includeAudio = it }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { input = "" }) { Text("清空") }
+                    OutlinedButton(onClick = { input = clipboardText(context) }) { Text("粘贴") }
                     Button(
-                        enabled = !busy,
+                        enabled = !parsing,
                         onClick = {
-                            busy = true
+                            parsing = true
                             scope.launch {
-                                parsed = parsePage(input)
-                                busy = false
+                                val result = parsePlatform(input)
+                                val filtered = result.items.filter {
+                                    (includeImage && (it.type == MediaType.Image || it.type == MediaType.Gif)) ||
+                                        (includeVideo && (it.type == MediaType.Video || it.type == MediaType.Playlist)) ||
+                                        (includeAudio && it.type == MediaType.Audio) ||
+                                        it.type == MediaType.Web ||
+                                        it.type == MediaType.File
+                                }
+                                parsed = result.copy(items = filtered)
+                                selectedItems.clear()
+                                selectedItems.addAll(filtered)
+                                parsing = false
                             }
                         }
-                    ) { Text(if (busy) "解析中" else "解析") }
-                    OutlinedButton(onClick = {
-                        val first = extractFirstUrl(input)
-                        if (first == null) toast(context, "没有找到链接") else enqueueDownload(context, first, null)
-                    }) { Text("直接下载") }
-                    TextButton(onClick = {
-                        input = ""
-                        parsed = null
-                    }) { Text("清空") }
+                    ) { Text(if (parsing) "解析中" else "开始") }
                 }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        val url = extractFirstUrl(input)
+                        if (url == null) {
+                            toast(context, "请先输入链接")
+                        } else {
+                            context.startActivity(Intent(context, SnifferActivity::class.java).putExtra(EXTRA_URL, url))
+                        }
+                    }
+                ) { Text("链接不支持？用任意门嗅探") }
             }
         }
-        parsed?.let { page ->
+        parsed?.let { result ->
             item {
                 SectionCard {
-                    if (page.error != null) {
-                        Text("解析失败", fontWeight = FontWeight.Bold, color = Color(0xFFC62828))
-                        Spacer(Modifier.height(6.dp))
-                        Text(page.error)
+                    if (result.error != null) {
+                        Text("解析失败", color = Color(0xFFC62828), fontWeight = FontWeight.Bold)
+                        Text(result.error)
                     } else {
-                        ResultLine("原始链接", page.inputUrl)
-                        ResultLine("跳转后", page.finalUrl)
-                        ResultLine("页面类型", page.contentType.ifBlank { "未识别" })
-                        ResultLine("标题", page.title.ifBlank { "未识别" })
-                        ResultLine("描述", page.description.ifBlank { "未识别" })
+                        ResultLine("跳转后", result.finalUrl)
+                        ResultLine("标题", result.title.ifBlank { "未识别" })
+                        ResultLine("描述", result.description.ifBlank { "未识别" })
                     }
                 }
             }
-            if (page.candidates.isNotEmpty()) {
+            if (result.items.isNotEmpty()) {
                 item {
-                    val counts = page.candidates.groupingBy { it.type }.eachCount()
-                    SectionCard {
-                        Text("识别结果", fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            counts.entries.joinToString("  ") { "${it.key.label} ${it.value}" }
-                                .ifBlank { "没有识别到媒体资源" },
-                            color = Color(0xFF667085)
-                        )
-                    }
-                }
-                items(page.candidates) { candidate ->
-                    CandidateRow(
-                        candidate = candidate,
-                        onCopy = {
-                            copyText(context, candidate.url)
-                            toast(context, "已复制")
+                    SnifferPanel(
+                        items = selectedItems,
+                        onClear = { selectedItems.clear() },
+                        onToggleAll = { checked ->
+                            for (index in selectedItems.indices) {
+                                selectedItems[index] = selectedItems[index].copy(selected = checked)
+                            }
                         },
-                        onDownload = { enqueueDownload(context, candidate.url, candidate.fileName) },
-                        onOpen = { openUrl(context, candidate.url) }
+                        onToggle = { item ->
+                            val index = selectedItems.indexOfFirst { it.url == item.url }
+                            if (index >= 0) selectedItems[index] = selectedItems[index].copy(selected = !selectedItems[index].selected)
+                        },
+                        onPreview = { openPreview(context, it) },
+                        onDownloadSelected = {
+                            val chosen = selectedItems.filter { it.selected }
+                            if (chosen.isEmpty()) {
+                                toast(context, "请先选择内容")
+                            } else {
+                                chosen.forEach { enqueueMediaDownload(context, it) }
+                                toast(context, "已加入下载任务")
+                            }
+                        }
                     )
                 }
             }
         }
         item {
-            SectionCard {
-                Text("本地版说明", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Text("无广告、无登录、无付费入口。解析会尽量标出视频、图片、音频、m3u8 列表和普通网页。")
-            }
-            Spacer(Modifier.height(18.dp))
+            Text("下载教程", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            Text("1. 打开要下载的平台，点击分享。", color = Color(0xFF667085))
+            Text("2. 复制链接或分享文案。", color = Color(0xFF667085))
+            Text("3. 粘贴到本页，选择图片/视频/音频后开始解析。", color = Color(0xFF667085))
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
 
 @Composable
-private fun DownloadScreen() {
-    val context = LocalContext.current
-    val rows = remember { mutableStateListOf<DownloadRow>() }
-
-    fun refresh() {
-        rows.clear()
-        rows.addAll(queryDownloads(context))
+private fun LabeledCheckBox(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = onChange)
+        Text(label)
     }
+}
 
-    LaunchedEffect(Unit) { refresh() }
+@Composable
+private fun SnifferPanel(
+    items: List<MediaItem>,
+    onClear: () -> Unit,
+    onToggleAll: (Boolean) -> Unit,
+    onToggle: (MediaItem) -> Unit,
+    onPreview: (MediaItem) -> Unit,
+    onDownloadSelected: () -> Unit
+) {
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("加载出的素材可先预览，再决定处理方式", color = Color(0xFFC62828), modifier = Modifier.weight(1f))
+            TextButton(onClick = onClear) { Text("清空") }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LabeledCheckBox("全选", items.all { it.selected } && items.isNotEmpty(), onToggleAll)
+            Text("已选 ${items.count { it.selected }} / ${items.size}", color = Color(0xFF667085))
+        }
+        Spacer(Modifier.height(8.dp))
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            modifier = Modifier.fillMaxWidth().height(340.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            items(items) { item ->
+                MediaTile(item = item, onToggle = { onToggle(item) }, onPreview = { onPreview(item) })
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Button(modifier = Modifier.fillMaxWidth().height(52.dp), onClick = onDownloadSelected) {
+            Text("下载选中内容")
+        }
+    }
+}
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+@Composable
+private fun MediaTile(item: MediaItem, onToggle: () -> Unit, onPreview: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(112.dp)
+            .background(Color(0xFFEFF3F6), RoundedCornerShape(8.dp))
+            .clickable(onClick = onPreview)
+            .padding(6.dp)
     ) {
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Text(typeIcon(item.type), style = MaterialTheme.typography.headlineSmall)
+            Text(item.type.label, fontWeight = FontWeight.Bold)
+            Text(item.size.ifBlank { item.source }, color = Color(0xFF667085), maxLines = 1)
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .clickable(onClick = onToggle)
+                .background(if (item.selected) MaterialTheme.colorScheme.primary else Color(0x99000000), RoundedCornerShape(12.dp))
+                .padding(horizontal = 7.dp, vertical = 3.dp)
+        ) {
+            Text(if (item.selected) "✓" else "选", color = Color.White)
+        }
+    }
+}
+
+@Composable
+private fun DownloadTaskScreen() {
+    val context = LocalContext.current
+    val tasks = remember { mutableStateListOf<MediaItem>() }
+    LaunchedEffect(Unit) {
+        tasks.clear()
+        tasks.addAll(TaskStore.load(context))
+    }
+    LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text("下载任务", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { refresh() }) { Text("刷新") }
-                OutlinedButton(onClick = { openDownloads(context) }) { Text("打开下载目录") }
-            }
+            Text("显示本地任务状态、类型、进度和系统下载器提交结果。", color = Color(0xFF667085))
         }
-        if (rows.isEmpty()) {
-            item {
-                SectionCard {
-                    Text("暂无系统下载记录")
-                    Spacer(Modifier.height(4.dp))
-                    Text("从首页点击下载后，任务会显示在这里。", color = Color(0xFF667085))
+        if (tasks.isEmpty()) {
+            item { SectionCard { Text("暂无任务，从首页解析并下载选中内容后会显示在这里。") } }
+        }
+        items(tasks) { task -> TaskCard(task) }
+    }
+}
+
+@Composable
+private fun TaskCard(task: MediaItem) {
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier.size(58.dp).background(Color(0xFFEFF3F6), RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center
+            ) { Text(typeIcon(task.type)) }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(task.fileName, fontWeight = FontWeight.Bold, maxLines = 2)
+                Spacer(Modifier.height(6.dp))
+                Box(Modifier.fillMaxWidth().height(6.dp).background(Color(0xFFE5E7EB), RoundedCornerShape(3.dp))) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(task.progress.coerceIn(0, 100) / 100f)
+                            .height(6.dp)
+                            .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(3.dp))
+                    )
                 }
+                Text(task.size.ifBlank { task.url }, color = Color(0xFF667085), maxLines = 1)
             }
-        } else {
-            items(rows) { row ->
-                SectionCard {
-                    Text(row.title, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(4.dp))
-                    Text("${row.status} ${row.reason}".trim(), color = Color(0xFF667085))
-                    if (row.uri.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(row.uri, color = MaterialTheme.colorScheme.secondary)
-                    }
-                }
+            Spacer(Modifier.width(8.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                TypeBadge(task.type)
+                Text(task.status, color = MaterialTheme.colorScheme.primary)
+                Text(task.speed, color = Color(0xFF667085))
             }
         }
     }
 }
 
 @Composable
-private fun ToolsScreen() {
+private fun ToolScreen() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var hashText by remember { mutableStateOf("请选择文件") }
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                hashText = "计算中..."
-                hashText = fileHashReport(context, uri)
-            }
-        }
-    }
-
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("本地工具", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("悬浮窗", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text("开启后会显示一个小浮窗，可从任何界面快速打开解析器或读取剪贴板文本。", color = Color(0xFF667085))
+            Text("从其他应用复制链接后，可快速打开解析器。", color = Color(0xFF667085))
             Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { startFloatingWindow(context) }) { Text("开启") }
-                OutlinedButton(onClick = { context.stopService(Intent(context, FloatingWindowService::class.java)) }) {
-                    Text("关闭")
-                }
+                OutlinedButton(onClick = { context.stopService(Intent(context, FloatingWindowService::class.java)) }) { Text("关闭") }
             }
-        }
-        SectionCard {
-            Text("文件校验", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text(hashText)
-            Spacer(Modifier.height(10.dp))
-            Button(onClick = { filePicker.launch("*/*") }) { Text("选择文件") }
         }
         ToolGrid(
             listOf(
-                "短链解析" to "解析跳转、标题、描述和候选资源",
-                "媒体识别" to "按视频、图片、音频、列表和网页分类",
-                "悬浮窗" to "复制链接后快速唤起解析器",
-                "系统下载" to "调用系统下载器保存文件",
-                "文件哈希" to "计算 MD5 与 SHA-256",
-                "本地优先" to "不含广告 SDK 和支付 SDK"
+                "任意门嗅探" to "WebView 拦截视频、图片、音频、m3u8 请求",
+                "视频工具" to "提取音频、转 MP4、压缩、取帧入口",
+                "图片工具" to "预览、设壁纸、编辑入口",
+                "检查更新" to "我的页检查 GitHub 最新 Release"
             )
         )
     }
@@ -375,135 +453,43 @@ private fun MineScreen() {
     val scope = rememberCoroutineScope()
     var checking by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
-
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text("版本 1.22")
-            Text("本地解析、本地下载、媒体类型识别、悬浮窗，无订阅、无广告。")
-        }
-        SectionCard {
-            Text("隐私", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text("应用不会收集账号信息，不集成广告 ID，不包含支付入口。网络请求仅由你输入的链接触发。")
+            Text("版本 1.23")
+            Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text("当前版本：1.22", color = Color(0xFF667085))
-            updateInfo?.let { info ->
+            Text("当前版本：1.23", color = Color(0xFF667085))
+            updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
-                    info.error != null -> Text("检查失败：${info.error}", color = Color(0xFFC62828))
-                    info.hasUpdate -> Text("发现新版本：${info.latestVersion}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                    else -> Text("已是最新版本：${info.latestVersion}", color = Color(0xFF667085))
+                    it.error != null -> Text("检查失败：${it.error}", color = Color(0xFFC62828))
+                    it.hasUpdate -> Text("发现新版本：${it.latestVersion}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    else -> Text("已是最新版本：${it.latestVersion}", color = Color(0xFF667085))
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    enabled = !checking,
-                    onClick = {
-                        checking = true
-                        scope.launch {
-                            updateInfo = checkForUpdates()
-                            checking = false
-                        }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = !checking, onClick = {
+                    checking = true
+                    scope.launch {
+                        updateInfo = checkForUpdates()
+                        checking = false
                     }
-                ) { Text(if (checking) "检查中" else "检查更新") }
+                }) { Text(if (checking) "检查中" else "检查更新") }
                 val info = updateInfo
                 if (info?.hasUpdate == true) {
-                    OutlinedButton(onClick = { openUrl(context, info.apkUrl.ifBlank { info.pageUrl }) }) {
-                        Text("下载更新")
-                    }
+                    OutlinedButton(onClick = { openUrl(context, info.apkUrl.ifBlank { info.pageUrl }) }) { Text("下载更新") }
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { openDownloads(context) }) { Text("下载目录") }
-            OutlinedButton(onClick = { shareAppText(context) }) { Text("分享说明") }
+        SectionCard {
+            Text("隐私", fontWeight = FontWeight.Bold)
+            Text("无广告、无账号、无支付。网络请求仅由你输入的链接或打开的嗅探网页触发。")
         }
-    }
-}
-
-@Composable
-private fun HeaderBlock() {
-    Column(modifier = Modifier.fillMaxWidth().background(Color.Transparent)) {
-        Text("便捷下载", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(4.dp))
-        Text("本地版", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Column(modifier = Modifier.padding(14.dp), content = content)
-    }
-}
-
-@Composable
-private fun ResultLine(label: String, value: String) {
-    Text(label, fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(2.dp))
-    Text(value)
-    Spacer(Modifier.height(8.dp))
-    Divider(color = Color(0xFFE5E7EB))
-    Spacer(Modifier.height(8.dp))
-}
-
-@Composable
-private fun CandidateRow(
-    candidate: MediaCandidate,
-    onCopy: () -> Unit,
-    onDownload: () -> Unit,
-    onOpen: () -> Unit
-) {
-    SectionCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TypeBadge(candidate.type)
-            Spacer(Modifier.width(8.dp))
-            Text(candidate.source, color = Color(0xFF667085))
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(candidate.fileName, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(4.dp))
-        Text(candidate.url, color = MaterialTheme.colorScheme.secondary)
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload) { Text("下载") }
-            OutlinedButton(onClick = onCopy) { Text("复制") }
-            OutlinedButton(onClick = onOpen) { Text("打开") }
-        }
-    }
-}
-
-@Composable
-private fun TypeBadge(type: MediaType) {
-    val color = when (type) {
-        MediaType.Video -> Color(0xFF1565C0)
-        MediaType.Image -> Color(0xFF2E7D32)
-        MediaType.Audio -> Color(0xFF6A1B9A)
-        MediaType.Playlist -> Color(0xFFEF6C00)
-        MediaType.Web -> Color(0xFF455A64)
-        MediaType.File -> Color(0xFF5D4037)
-        MediaType.Unknown -> Color(0xFF757575)
-    }
-    Box(
-        modifier = Modifier.background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(type.label, color = color, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -512,10 +498,7 @@ private fun ToolGrid(items: List<Pair<String, String>>) {
     items.forEach { item ->
         SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier.size(34.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(Modifier.size(34.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
                     Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.width(12.dp))
@@ -528,200 +511,194 @@ private fun ToolGrid(items: List<Pair<String, String>>) {
     }
 }
 
-private suspend fun parsePage(input: String): ParsedPage = withContext(Dispatchers.IO) {
-    val url = extractFirstUrl(input)
-    if (url == null) {
-        return@withContext ParsedPage("", "", "", "", "", emptyList(), "没有找到 http/https 链接")
+@Composable
+private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) { Column(Modifier.padding(14.dp), content = content) }
+}
+
+@Composable
+private fun ResultLine(label: String, value: String) {
+    Text(label, fontWeight = FontWeight.Bold)
+    Text(value)
+    Spacer(Modifier.height(6.dp))
+    Divider(color = Color(0xFFE5E7EB))
+    Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun TypeBadge(type: MediaType) {
+    val color = when (type) {
+        MediaType.Video -> Color(0xFF1565C0)
+        MediaType.Image, MediaType.Gif -> Color(0xFF2E7D32)
+        MediaType.Audio -> Color(0xFF6A1B9A)
+        MediaType.Playlist -> Color(0xFFEF6C00)
+        MediaType.Web -> Color(0xFF455A64)
+        MediaType.File -> Color(0xFF5D4037)
+        MediaType.Other -> Color(0xFF757575)
     }
+    Box(Modifier.background(color.copy(alpha = 0.12f), RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Text(type.label, color = color, fontWeight = FontWeight.Bold)
+    }
+}
+
+private suspend fun parsePlatform(input: String): ParsedResult = withContext(Dispatchers.IO) {
+    val url = extractFirstUrl(input) ?: return@withContext ParsedResult("", "", "", "", emptyList(), "没有找到 http/https 链接")
     try {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 15000
             readTimeout = 20000
-            requestMethod = "GET"
             setRequestProperty("User-Agent", MOBILE_UA)
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
         }
         val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         val finalUrl = connection.url.toString()
-        val contentType = connection.contentType.orEmpty()
-        val candidates = buildCandidates(html, finalUrl, contentType)
-        ParsedPage(
-            inputUrl = url,
-            finalUrl = finalUrl,
-            title = htmlTitle(html),
-            description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") },
-            contentType = contentType.ifBlank { classifyUrl(finalUrl, "").label },
-            candidates = candidates
-        )
+        val title = htmlTitle(html)
+        val description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") }
+        val items = buildMediaItems(html, finalUrl, connection.contentType.orEmpty(), title)
+        ParsedResult(url, finalUrl, title, description, items)
     } catch (e: Exception) {
-        ParsedPage(url, url, "", "", "", emptyList(), e.message ?: "网络请求失败")
+        ParsedResult(url, url, "", "", emptyList(), e.message ?: "网络请求失败")
     }
 }
 
-fun extractFirstUrl(text: String): String? {
-    return Regex("""https?://[^\s"'<>]+""").find(text)?.value?.trimEnd('.', ',', ';', ')', ']', '}')
-}
+fun extractFirstUrl(text: String): String? =
+    Regex("""https?://[^\s"'<>]+""").find(text)?.value?.trimEnd('.', ',', ';', ')', ']', '}')
 
-private fun htmlTitle(html: String): String {
-    val og = metaContent(html, "og:title")
-    if (og.isNotBlank()) return og
-    return Regex("""<title[^>]*>(.*?)</title>""", RegexOption.IGNORE_CASE)
-        .find(html)?.groupValues?.getOrNull(1)?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
-}
-
-private fun metaContent(html: String, name: String): String {
-    val escaped = Regex.escape(name)
-    val patterns = listOf(
-        Regex("""<meta\s+(?:property|name)=["']$escaped["']\s+content=["']([^"']+)["'][^>]*>""", RegexOption.IGNORE_CASE),
-        Regex("""<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']$escaped["'][^>]*>""", RegexOption.IGNORE_CASE)
-    )
-    return patterns.firstNotNullOfOrNull { it.find(html)?.groupValues?.getOrNull(1) }?.htmlDecode().orEmpty()
-}
-
-private fun buildCandidates(html: String, finalUrl: String, contentType: String): List<MediaCandidate> {
+private fun buildMediaItems(html: String, finalUrl: String, mime: String, title: String): List<MediaItem> {
     val values = linkedMapOf<String, String>()
-
-    listOf(
-        "og:video" to "页面视频",
-        "og:video:url" to "页面视频",
-        "og:video:secure_url" to "页面视频",
-        "twitter:player:stream" to "页面视频",
-        "og:image" to "页面图片",
-        "og:image:url" to "页面图片",
-        "twitter:image" to "页面图片",
-        "og:audio" to "页面音频"
-    ).forEach { (name, source) ->
-        metaContent(html, name).takeIf { it.startsWith("http") }?.let { values[it.unescapeUrl()] = source }
+    val metaNames = listOf(
+        "og:video",
+        "og:video:url",
+        "og:video:secure_url",
+        "twitter:player:stream",
+        "og:image",
+        "og:image:url",
+        "twitter:image",
+        "og:audio"
+    )
+    metaNames.forEach { name ->
+        metaContent(html, name).takeIf { it.startsWith("http") }?.let { values[it.unescapeUrl()] = "页面元信息" }
     }
-
     Regex("""(?:src|href|url|play_addr|download_addr|cover|origin_cover|dynamic_cover)["'\s:=]+(?:\[)?["']?(https?:\\?/\\?/[^"'\]\s<>]+|https?://[^"'\]\s<>]+)""", RegexOption.IGNORE_CASE)
         .findAll(html)
         .forEach { values[it.groupValues[1].unescapeUrl()] = "页面资源" }
-
     Regex("""https?:\\?/\\?/[^"' <>\n\r]+|https?://[^"' <>\n\r]+""", RegexOption.IGNORE_CASE)
         .findAll(html)
         .map { it.value.unescapeUrl() }
         .filter { shouldKeepCandidate(it) }
         .forEach { values.putIfAbsent(it, "页面链接") }
-
     values.putIfAbsent(finalUrl, "跳转目标")
-
-    return values.entries
-        .map { (url, source) ->
-            MediaCandidate(
-                url = url,
-                type = classifyUrl(url, if (url == finalUrl) contentType else ""),
-                source = source,
-                fileName = fileNameFor(url)
-            )
-        }
-        .distinctBy { it.url }
-        .sortedBy { typeRank(it.type) }
-        .take(80)
+    return values.map { (url, source) ->
+        MediaItem(url = url, type = classifyMedia(url, if (url == finalUrl) mime else ""), title = title, source = source)
+    }.distinctBy { it.url }.sortedBy { mediaRank(it.type) }.take(120)
 }
 
-private fun shouldKeepCandidate(url: String): Boolean {
-    val terms = listOf("douyin", "snssdk", "byteimg", "douyinvod", "ixigua", "pstatp", "amemv", "bilibili", "kuaishou", "m3u8", ".mp4", ".jpg", ".jpeg", ".png", ".webp", ".mp3", ".aac")
+private fun htmlTitle(html: String): String = metaContent(html, "og:title").ifBlank {
+    Regex("""<title[^>]*>(.*?)</title>""", RegexOption.IGNORE_CASE)
+        .find(html)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.replace(Regex("""\s+"""), " ")
+        ?.trim()
+        .orEmpty()
+}
+
+private fun metaContent(html: String, name: String): String {
+    val escaped = Regex.escape(name)
+    return listOf(
+        Regex("""<meta\s+(?:property|name)=["']$escaped["']\s+content=["']([^"']+)["'][^>]*>""", RegexOption.IGNORE_CASE),
+        Regex("""<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']$escaped["'][^>]*>""", RegexOption.IGNORE_CASE)
+    ).firstNotNullOfOrNull { it.find(html)?.groupValues?.getOrNull(1) }?.htmlDecode().orEmpty()
+}
+
+fun classifyMedia(url: String, mime: String = ""): MediaType {
+    val clean = Uri.decode(url).lowercase(Locale.US).substringBefore("?")
+    val type = mime.lowercase(Locale.US)
+    return when {
+        type.startsWith("video/") || clean.endsWith(".mp4") || clean.endsWith(".mov") || clean.endsWith(".webm") || clean.endsWith(".mkv") -> MediaType.Video
+        clean.endsWith(".m3u8") || clean.endsWith(".mpd") -> MediaType.Playlist
+        clean.endsWith(".gif") -> MediaType.Gif
+        type.startsWith("image/") || clean.endsWith(".jpg") || clean.endsWith(".jpeg") || clean.endsWith(".png") || clean.endsWith(".webp") -> MediaType.Image
+        type.startsWith("audio/") || clean.endsWith(".mp3") || clean.endsWith(".aac") || clean.endsWith(".m4a") || clean.endsWith(".wav") || clean.endsWith(".flac") -> MediaType.Audio
+        type.startsWith("text/html") || clean.contains("v.douyin.com") || clean.contains("/share/") -> MediaType.Web
+        clean.substringAfterLast('.', "").length in 2..5 -> MediaType.File
+        else -> MediaType.Other
+    }
+}
+
+fun shouldKeepCandidate(url: String): Boolean {
+    val terms = listOf(
+        "douyin",
+        "snssdk",
+        "byteimg",
+        "douyinvod",
+        "ixigua",
+        "pstatp",
+        "amemv",
+        "bilibili",
+        "kuaishou",
+        "m3u8",
+        ".mp4",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".mp3",
+        ".aac",
+        ".m4a"
+    )
     return terms.any { url.contains(it, ignoreCase = true) }
 }
 
-fun classifyUrl(url: String, mime: String): MediaType {
-    val lower = Uri.decode(url).lowercase(Locale.US).substringBefore("?")
-    val lowerMime = mime.lowercase(Locale.US)
-    return when {
-        lowerMime.startsWith("video/") || lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".mkv") || lower.endsWith(".webm") -> MediaType.Video
-        lower.endsWith(".m3u8") || lower.endsWith(".mpd") -> MediaType.Playlist
-        lowerMime.startsWith("image/") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif") -> MediaType.Image
-        lowerMime.startsWith("audio/") || lower.endsWith(".mp3") || lower.endsWith(".aac") || lower.endsWith(".m4a") || lower.endsWith(".wav") || lower.endsWith(".flac") -> MediaType.Audio
-        lowerMime.startsWith("text/html") || lower.contains("/share/") || lower.contains("v.douyin.com") -> MediaType.Web
-        lower.substringAfterLast('.', "").length in 2..5 -> MediaType.File
-        else -> MediaType.Unknown
-    }
-}
-
-private fun typeRank(type: MediaType): Int = when (type) {
+private fun mediaRank(type: MediaType): Int = when (type) {
     MediaType.Video -> 0
     MediaType.Playlist -> 1
     MediaType.Image -> 2
-    MediaType.Audio -> 3
-    MediaType.File -> 4
-    MediaType.Web -> 5
-    MediaType.Unknown -> 6
+    MediaType.Gif -> 3
+    MediaType.Audio -> 4
+    MediaType.File -> 5
+    MediaType.Web -> 6
+    MediaType.Other -> 7
 }
 
-private fun fileNameFor(url: String): String {
-    val decoded = runCatching { Uri.decode(url) }.getOrElse { url }
-    val last = decoded.substringBefore("?").trimEnd('/').substringAfterLast('/')
-    return last.takeIf { it.isNotBlank() && it.length < 100 } ?: "resource-${System.currentTimeMillis()}"
-}
-
-private fun String.unescapeUrl(): String = replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
-
-private fun String.htmlDecode(): String {
-    return replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
-}
-
-private fun enqueueDownload(context: Context, url: String, preferredName: String?) {
-    try {
-        val uri = Uri.parse(url)
-        val name = preferredName?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "download-${System.currentTimeMillis()}"
-        val request = DownloadManager.Request(uri)
-            .setTitle(name)
-            .setDescription(url)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name.safeFileName())
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-        context.getSystemService(DownloadManager::class.java).enqueue(request)
-        toast(context, "已加入下载任务")
-    } catch (e: Exception) {
-        toast(context, e.message ?: "无法下载")
+fun enqueueMediaDownload(context: Context, item: MediaItem) {
+    val task = if (item.type == MediaType.Playlist) {
+        item.copy(status = "播放列表待处理", progress = 0, speed = "m3u8")
+    } else {
+        val id = runCatching {
+            val request = DownloadManager.Request(Uri.parse(item.url))
+                .setTitle(item.fileName)
+                .setDescription(item.url)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, item.fileName.safeFileName())
+            context.getSystemService(DownloadManager::class.java).enqueue(request)
+        }.getOrNull()
+        item.copy(
+            status = if (id == null) "加入失败" else "下载中",
+            progress = if (id == null) 0 else 5,
+            speed = if (id == null) "" else "系统下载器"
+        )
     }
+    TaskStore.add(context, task)
 }
 
-private fun queryDownloads(context: Context): List<DownloadRow> {
-    val manager = context.getSystemService(DownloadManager::class.java)
-    val rows = mutableListOf<DownloadRow>()
-    manager.query(DownloadManager.Query())?.use { cursor ->
-        val idCol = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
-        val titleCol = cursor.getColumnIndex(DownloadManager.COLUMN_TITLE)
-        val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-        val reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
-        val uriCol = cursor.getColumnIndex(DownloadManager.COLUMN_URI)
-        while (cursor.moveToNext() && rows.size < 50) {
-            val status = cursor.getInt(statusCol)
-            rows += DownloadRow(
-                id = cursor.getLong(idCol),
-                title = cursor.getString(titleCol).orEmpty().ifBlank { "未命名任务" },
-                status = status.label(),
-                reason = cursor.getInt(reasonCol).reasonLabel(status),
-                uri = cursor.getString(uriCol).orEmpty()
-            )
-        }
-    }
-    return rows.sortedByDescending { it.id }
+fun openPreview(context: Context, item: MediaItem) {
+    context.startActivity(Intent(context, PreviewActivity::class.java).apply {
+        putExtra(EXTRA_URL, item.url)
+        putExtra(EXTRA_MEDIA_TYPE, item.type.name)
+        putExtra(EXTRA_TITLE, item.title.ifBlank { item.fileName })
+    })
 }
 
-private suspend fun fileHashReport(context: Context, uri: Uri): String = withContext(Dispatchers.IO) {
-    val name = context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (cursor.moveToFirst() && index >= 0) cursor.getString(index) else null
-    } ?: uri.lastPathSegment.orEmpty()
-    val md5 = MessageDigest.getInstance("MD5")
-    val sha = MessageDigest.getInstance("SHA-256")
-    context.contentResolver.openInputStream(uri)?.use { raw ->
-        BufferedInputStream(raw).use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                md5.update(buffer, 0, read)
-                sha.update(buffer, 0, read)
-            }
-        }
-    }
-    "文件：$name\nMD5：${md5.digest().hex()}\nSHA-256：${sha.digest().hex()}"
+private fun openSupportList(context: Context) {
+    toast(context, "支持：抖音、小红书、微博、B 站等公开网页；失败时可用任意门嗅探。")
 }
 
 private suspend fun checkForUpdates(): UpdateInfo = withContext(Dispatchers.IO) {
@@ -729,7 +706,6 @@ private suspend fun checkForUpdates(): UpdateInfo = withContext(Dispatchers.IO) 
         val connection = (URL("https://api.github.com/repos/7116-byte/EasyDownloadLocal/releases/latest").openConnection() as HttpURLConnection).apply {
             connectTimeout = 12000
             readTimeout = 15000
-            requestMethod = "GET"
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("User-Agent", "EasyDownloadLocal/$CURRENT_VERSION_NAME")
         }
@@ -737,65 +713,62 @@ private suspend fun checkForUpdates(): UpdateInfo = withContext(Dispatchers.IO) 
         val tag = Regex(""""tag_name"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
         val pageUrl = Regex(""""html_url"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
         val apkUrl = Regex(""""browser_download_url"\s*:\s*"([^"]*\.apk)"""").find(body)?.groupValues?.getOrNull(1).orEmpty()
-        val latestCode = versionCodeFromTag(tag)
-        UpdateInfo(
-            latestVersion = tag.ifBlank { "未知" },
-            pageUrl = pageUrl,
-            apkUrl = apkUrl,
-            hasUpdate = latestCode > CURRENT_VERSION_CODE
-        )
+        UpdateInfo(tag.ifBlank { "未知" }, pageUrl, apkUrl, versionCodeFromTag(tag) > CURRENT_VERSION_CODE)
     } catch (e: Exception) {
         UpdateInfo("", "", "", false, e.message ?: "无法连接 GitHub")
     }
 }
 
 private fun versionCodeFromTag(tag: String): Int {
-    val clean = tag.trim().removePrefix("v")
-    val parts = clean.split(".").mapNotNull { it.toIntOrNull() }
-    if (parts.isEmpty()) return 0
-    val major = parts.getOrElse(0) { 0 }
-    val minor = parts.getOrElse(1) { 0 }
-    val patch = parts.getOrElse(2) { 0 }
-    return major * 10000 + minor * 100 + patch
+    val parts = tag.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
+    return parts.getOrElse(0) { 0 } * 10000 + parts.getOrElse(1) { 0 } * 100 + parts.getOrElse(2) { 0 }
 }
 
-private fun Int.label(): String = when (this) {
-    DownloadManager.STATUS_PENDING -> "等待中"
-    DownloadManager.STATUS_RUNNING -> "下载中"
-    DownloadManager.STATUS_PAUSED -> "已暂停"
-    DownloadManager.STATUS_SUCCESSFUL -> "已完成"
-    DownloadManager.STATUS_FAILED -> "失败"
-    else -> "未知"
-}
-
-private fun Int.reasonLabel(status: Int): String {
-    if (status != DownloadManager.STATUS_FAILED && status != DownloadManager.STATUS_PAUSED) return ""
-    return when (this) {
-        DownloadManager.PAUSED_WAITING_FOR_NETWORK -> "等待网络"
-        DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "等待 Wi-Fi"
-        DownloadManager.ERROR_CANNOT_RESUME -> "无法恢复"
-        DownloadManager.ERROR_DEVICE_NOT_FOUND -> "存储不可用"
-        DownloadManager.ERROR_FILE_ALREADY_EXISTS -> "文件已存在"
-        DownloadManager.ERROR_HTTP_DATA_ERROR -> "HTTP 数据错误"
-        DownloadManager.ERROR_INSUFFICIENT_SPACE -> "空间不足"
-        DownloadManager.ERROR_TOO_MANY_REDIRECTS -> "跳转过多"
-        DownloadManager.ERROR_UNHANDLED_HTTP_CODE -> "HTTP 错误"
+fun fileNameFor(url: String, type: MediaType): String {
+    val decoded = runCatching { Uri.decode(url) }.getOrElse { url }
+    val last = decoded.substringBefore("?").trimEnd('/').substringAfterLast('/')
+    val fallbackExt = when (type) {
+        MediaType.Video -> ".mp4"
+        MediaType.Image -> ".jpg"
+        MediaType.Gif -> ".gif"
+        MediaType.Audio -> ".mp3"
+        MediaType.Playlist -> ".m3u8"
         else -> ""
     }
+    return last.takeIf { it.isNotBlank() && it.length < 90 } ?: "resource-${System.currentTimeMillis()}$fallbackExt"
 }
 
-private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
-
-private fun String.safeFileName(): String {
-    return replace(Regex("""[\\/:*?"<>|]"""), "_").take(80).ifBlank {
-        SimpleDateFormat("'download-'yyyyMMdd-HHmmss", Locale.US).format(Date())
-    }
+fun typeIcon(type: MediaType): String = when (type) {
+    MediaType.Video -> "▶"
+    MediaType.Image -> "图"
+    MediaType.Gif -> "GIF"
+    MediaType.Audio -> "♪"
+    MediaType.Playlist -> "M3U8"
+    MediaType.Web -> "页"
+    MediaType.File -> "文"
+    MediaType.Other -> "?"
 }
+
+private fun String.unescapeUrl(): String = replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
+
+private fun String.htmlDecode(): String = replace("&amp;", "&")
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+    .replace("&#39;", "'")
+
+fun String.safeFileName(): String = replace(Regex("""[\\/:*?"<>|]"""), "_").take(80).ifBlank {
+    SimpleDateFormat("'download-'yyyyMMdd-HHmmss", Locale.US).format(Date())
+}
+
+private fun clipboardText(context: Context): String =
+    context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+
+fun parseIntentForText(context: Context): String = clipboardText(context)
 
 private fun startFloatingWindow(context: Context) {
     if (!Settings.canDrawOverlays(context)) {
-        val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
-        context.startActivity(intent)
+        context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
         toast(context, "请先允许悬浮窗权限")
         return
     }
@@ -803,40 +776,25 @@ private fun startFloatingWindow(context: Context) {
     toast(context, "悬浮窗已开启")
 }
 
-private fun copyText(context: Context, text: String) {
+fun copyText(context: Context, text: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("link", text))
+    toast(context, "已复制链接")
 }
 
-private fun openUrl(context: Context, url: String) {
+fun openUrl(context: Context, url: String) {
     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
         .onFailure { toast(context, "无法打开链接") }
 }
 
-private fun openDownloads(context: Context) {
-    val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(intent) }.onFailure { toast(context, "无法打开下载目录") }
-}
-
-private fun shareAppText(context: Context) {
-    val intent = Intent(Intent.ACTION_SEND)
-        .setType("text/plain")
-        .putExtra(Intent.EXTRA_TEXT, "便捷下载本地版：无广告、无登录、无付费入口，支持媒体类型识别和悬浮窗。")
-    context.startActivity(Intent.createChooser(intent, "分享"))
-}
-
-fun parseIntentForText(context: Context): String {
-    val clip = context.getSystemService(ClipboardManager::class.java).primaryClip
-    return clip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-}
-
-private fun toast(context: Context, text: String) {
+fun toast(context: Context, text: String) {
     Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 }
 
 const val EXTRA_PARSE_TEXT = "com.local.easydownload.PARSE_TEXT"
+const val EXTRA_URL = "com.local.easydownload.URL"
+const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
+const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.22"
-private const val CURRENT_VERSION_CODE = 10202
-
-private const val MOBILE_UA =
-    "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
+private const val CURRENT_VERSION_NAME = "1.23"
+private const val CURRENT_VERSION_CODE = 12300
+private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
