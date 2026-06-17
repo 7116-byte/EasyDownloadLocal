@@ -1,0 +1,14 @@
+.gradle/
+build/
+app/build/
+local.properties
+tools/
+apk_unpacked/
+decoded/
+decoded-control/
+signed/
+signed-control/
+start-douyin-local.ps1
+*.apk
+*.ap_
+*.idsig
