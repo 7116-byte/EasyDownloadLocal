@@ -17,6 +17,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.GridView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -144,7 +145,11 @@ class SnifferActivity : ComponentActivity() {
         if (!keep) return
         synchronized(sniffed) {
             if (sniffed.none { it.url == url }) {
-                sniffed.add(MediaItem(url = url, type = type, source = source, selected = true))
+                val cover = when {
+                    type == MediaType.Image || type == MediaType.Gif -> url
+                    else -> sniffed.firstOrNull { it.type == MediaType.Image || it.type == MediaType.Gif }?.url.orEmpty()
+                }
+                sniffed.add(MediaItem(url = url, type = type, source = source, selected = true, coverUrl = cover))
             }
         }
         runOnUiThread { updateCount() }
@@ -282,6 +287,9 @@ class SnifferActivity : ComponentActivity() {
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
             val item = items[position]
+            val thumbUrl = item.coverUrl.ifBlank {
+                if (item.type == MediaType.Image || item.type == MediaType.Gif) item.url else ""
+            }
             val root = (convertView as? LinearLayout) ?: LinearLayout(this@SnifferActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -289,13 +297,20 @@ class SnifferActivity : ComponentActivity() {
                 setBackgroundColor(0xFFEFF3F6.toInt())
             }
             root.removeAllViews()
+            if (thumbUrl.isNotBlank()) {
+                root.addView(ImageView(this@SnifferActivity).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    loadThumbnailInto(this, thumbUrl)
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 118))
+            } else {
+                root.addView(TextView(this@SnifferActivity).apply {
+                    text = typeIcon(item.type)
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                })
+            }
             root.addView(TextView(this@SnifferActivity).apply {
-                text = typeIcon(item.type)
-                textSize = 22f
-                gravity = Gravity.CENTER
-            })
-            root.addView(TextView(this@SnifferActivity).apply {
-                text = item.type.label
+                text = "${typeIcon(item.type)} ${item.type.label}"
                 setTextColor(0xFF111827.toInt())
                 gravity = Gravity.CENTER
             })

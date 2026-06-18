@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -64,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -128,6 +130,12 @@ private data class UpdateInfo(
     val apkUrl: String,
     val hasUpdate: Boolean,
     val error: String? = null
+)
+
+private data class ExtractedMediaUrl(
+    val url: String,
+    val type: MediaType,
+    val source: String
 )
 
 private val AppColors = lightColorScheme(
@@ -362,6 +370,9 @@ private fun SnifferPanel(
 
 @Composable
 private fun MediaTile(item: MediaItem, onToggle: () -> Unit, onPreview: () -> Unit) {
+    val thumbUrl = item.coverUrl.ifBlank {
+        if (item.type == MediaType.Image || item.type == MediaType.Gif) item.url else ""
+    }
     Box(
         modifier = Modifier
             .height(112.dp)
@@ -369,10 +380,17 @@ private fun MediaTile(item: MediaItem, onToggle: () -> Unit, onPreview: () -> Un
             .clickable(onClick = onPreview)
             .padding(6.dp)
     ) {
-        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(typeIcon(item.type), style = MaterialTheme.typography.headlineSmall)
-            Text(item.type.label, fontWeight = FontWeight.Bold)
-            Text(item.size.ifBlank { item.source }, color = Color(0xFF667085), maxLines = 1)
+        if (thumbUrl.isNotBlank()) {
+            NetworkThumbnail(thumbUrl, Modifier.fillMaxSize())
+            Box(Modifier.align(Alignment.TopStart).background(Color(0xAA000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                Text("${typeIcon(item.type)} ${item.type.label}", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        } else {
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text(typeIcon(item.type), style = MaterialTheme.typography.headlineSmall)
+                Text(item.type.label, fontWeight = FontWeight.Bold)
+                Text(item.size.ifBlank { item.source }, color = Color(0xFF667085), maxLines = 1)
+            }
         }
         Box(
             modifier = Modifier
@@ -384,6 +402,20 @@ private fun MediaTile(item: MediaItem, onToggle: () -> Unit, onPreview: () -> Un
             Text(if (item.selected) "✓" else "选", color = Color.White)
         }
     }
+}
+
+@Composable
+private fun NetworkThumbnail(url: String, modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { context ->
+            ImageView(context).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(0xFFEFF3F6.toInt())
+            }
+        },
+        update = { imageView -> loadThumbnailInto(imageView, url) }
+    )
 }
 
 @Composable
@@ -408,12 +440,24 @@ private fun DownloadTaskScreen() {
 
 @Composable
 private fun TaskCard(task: MediaItem) {
+    val thumbUrl = task.coverUrl.ifBlank {
+        if (task.type == MediaType.Image || task.type == MediaType.Gif) task.url else ""
+    }
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier.size(58.dp).background(Color(0xFFEFF3F6), RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
-            ) { Text(typeIcon(task.type)) }
+            ) {
+                if (thumbUrl.isNotBlank()) {
+                    NetworkThumbnail(thumbUrl, Modifier.fillMaxSize())
+                    Box(Modifier.align(Alignment.BottomEnd).background(Color(0xAA000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp)) {
+                        Text(typeIcon(task.type), color = Color.White)
+                    }
+                } else {
+                    Text(typeIcon(task.type))
+                }
+            }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(task.fileName, fontWeight = FontWeight.Bold, maxLines = 2)
@@ -491,12 +535,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.24")
+            Text("版本 1.25")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.24", color = Color(0xFF667085))
+            Text("当前版本：1.25", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -636,29 +680,55 @@ private fun buildMediaItems(html: String, finalUrl: String, mime: String, title:
         .filter { shouldKeepCandidate(it) }
         .forEach { values.putIfAbsent(it.normalizeMediaUrl(), "JSON 资源") }
     values.putIfAbsent(finalUrl, "跳转目标")
+    val coverUrl = values.keys.firstOrNull {
+        classifyMedia(it) == MediaType.Image && looksLikeCoverUrl(it)
+    }.orEmpty()
     return values.map { (url, source) ->
-        MediaItem(url = url, type = classifyMedia(url, if (url == finalUrl) mime else ""), title = title, source = source)
+        val type = classifyMedia(url, if (url == finalUrl) mime else "")
+        MediaItem(
+            url = url,
+            type = type,
+            title = title,
+            source = source,
+            coverUrl = when {
+                type == MediaType.Image || type == MediaType.Gif -> url
+                coverUrl.isNotBlank() -> coverUrl
+                else -> ""
+            }
+        )
     }.distinctBy { it.url }.sortedBy { mediaRank(it.type) }.take(120)
 }
 
 private fun buildDouyinItems(html: String, finalUrl: String, title: String): List<MediaItem> {
     if (!finalUrl.contains("douyin", ignoreCase = true) && !html.contains("douyin", ignoreCase = true)) return emptyList()
     val id = extractDouyinId(finalUrl, html)
-    val sources = mutableListOf<Pair<String, String>>()
+    val sources = mutableListOf<ExtractedMediaUrl>()
     val decodedHtml = html.deepUnescape()
-    extractMediaUrls(decodedHtml).forEach { sources += it.normalizeMediaUrl() to "抖音页面 JSON" }
+    sources += extractDouyinMediaCandidates(decodedHtml, "抖音页面 JSON")
     if (!id.isNullOrBlank()) {
         fetchDouyinDetailBodies(id).forEach { body ->
-            extractMediaUrls(body.deepUnescape()).forEach { sources += it.normalizeMediaUrl() to "抖音详情接口" }
+            sources += extractDouyinMediaCandidates(body.deepUnescape(), "抖音详情接口")
         }
     }
+    val coverUrl = sources.firstOrNull { it.type == MediaType.Image && looksLikeCoverUrl(it.url) }?.url
+        ?: sources.firstOrNull { it.type == MediaType.Image }?.url.orEmpty()
     return sources
-        .filter { shouldKeepCandidate(it.first) || classifyMedia(it.first) != MediaType.Other }
-        .map { (url, source) ->
-            MediaItem(url = url, type = classifyMedia(url), title = title, source = source)
+        .filter { it.type != MediaType.Web && it.type != MediaType.Other }
+        .filterNot { it.type == MediaType.Video && looksLikeAudioUrl(it.url) }
+        .map { extracted ->
+            MediaItem(
+                url = extracted.url,
+                type = extracted.type,
+                title = title,
+                source = extracted.source,
+                coverUrl = when {
+                    extracted.type == MediaType.Image || extracted.type == MediaType.Gif -> extracted.url
+                    coverUrl.isNotBlank() -> coverUrl
+                    else -> ""
+                }
+            )
         }
         .distinctBy { it.url }
-        .filter { it.type != MediaType.Web && it.type != MediaType.Other }
         .take(80)
 }
 
@@ -692,18 +762,63 @@ private fun fetchDouyinDetailBodies(awemeId: String): List<String> {
     }
 }
 
-private fun extractMediaUrls(text: String): List<String> {
-    val urls = Regex("""https?://[^"' <>\n\r\\]+""", RegexOption.IGNORE_CASE)
-        .findAll(text)
-        .map { it.value.trimEnd('\\', ',', '}', ']', ')') }
-        .toList()
-    val focused = urls.filter {
-        shouldKeepCandidate(it) ||
-            it.contains("play_addr", ignoreCase = true) ||
-            it.contains("download_addr", ignoreCase = true) ||
-            it.contains("cover", ignoreCase = true)
+private fun extractDouyinMediaCandidates(text: String, source: String): List<ExtractedMediaUrl> {
+    val result = linkedMapOf<String, ExtractedMediaUrl>()
+    Regex("""https?://[^"' <>\n\r\\]+""", RegexOption.IGNORE_CASE).findAll(text).forEach { match ->
+        val rawUrl = match.value.trimEnd('\\', ',', '}', ']', ')').normalizeMediaUrl()
+        val before = text.substring((match.range.first - 260).coerceAtLeast(0), match.range.first).lowercase(Locale.US)
+        val after = text.substring(match.range.last.coerceAtMost(text.lastIndex), (match.range.last + 120).coerceAtMost(text.length)).lowercase(Locale.US)
+        val context = before + after
+        val type = when {
+            looksLikeCoverUrl(rawUrl) || context.contains("cover") || context.contains("origin_cover") || context.contains("dynamic_cover") -> classifyImageOrGif(rawUrl)
+            context.contains("music") || context.contains("audio") || context.contains("play_url") || looksLikeAudioUrl(rawUrl) -> MediaType.Audio
+            context.contains("play_addr") || context.contains("download_addr") || context.contains("video") || looksLikeDouyinVideoUrl(rawUrl) -> MediaType.Video
+            classifyMedia(rawUrl) == MediaType.Playlist -> MediaType.Playlist
+            classifyMedia(rawUrl) == MediaType.Image || classifyMedia(rawUrl) == MediaType.Gif -> classifyMedia(rawUrl)
+            classifyMedia(rawUrl) == MediaType.Audio -> MediaType.Audio
+            else -> MediaType.Other
+        }
+        if (type != MediaType.Other && type != MediaType.Web) {
+            result[rawUrl] = ExtractedMediaUrl(rawUrl, type, source)
+        }
     }
-    return focused.ifEmpty { urls.filter { classifyMedia(it) != MediaType.Web && classifyMedia(it) != MediaType.Other } }
+    return result.values.toList()
+}
+
+private fun classifyImageOrGif(url: String): MediaType =
+    if (url.substringBefore("?").endsWith(".gif", ignoreCase = true)) MediaType.Gif else MediaType.Image
+
+private fun looksLikeCoverUrl(url: String): Boolean {
+    val clean = url.lowercase(Locale.US)
+    return clean.contains("cover") ||
+        clean.contains("poster") ||
+        clean.contains("tos-cn-i") ||
+        clean.contains("byteimg") ||
+        clean.contains("imagex") ||
+        clean.endsWith(".jpg") ||
+        clean.endsWith(".jpeg") ||
+        clean.endsWith(".png") ||
+        clean.endsWith(".webp")
+}
+
+private fun looksLikeAudioUrl(url: String): Boolean {
+    val clean = url.lowercase(Locale.US)
+    return clean.contains("/music/") ||
+        clean.contains("music") ||
+        clean.contains("audio") ||
+        clean.contains("mime_type=audio") ||
+        clean.endsWith(".mp3") ||
+        clean.endsWith(".m4a") ||
+        clean.endsWith(".aac")
+}
+
+private fun looksLikeDouyinVideoUrl(url: String): Boolean {
+    val clean = url.lowercase(Locale.US)
+    return clean.contains("douyinvod") ||
+        clean.contains("/video/tos/") ||
+        clean.contains("playwm") ||
+        clean.contains("/play/") ||
+        clean.endsWith(".mp4")
 }
 
 private fun htmlTitle(html: String): String = metaContent(html, "og:title").ifBlank {
@@ -729,16 +844,14 @@ fun classifyMedia(url: String, mime: String = ""): MediaType {
     val type = mime.lowercase(Locale.US)
     return when {
         clean.contains("v.douyin.com") || clean.contains("www.douyin.com") && (clean.contains("/video/") || clean.contains("/note/")) -> MediaType.Web
+        looksLikeAudioUrl(clean) || type.startsWith("audio/") || type.contains("audio/") || clean.endsWith(".mp3") || clean.endsWith(".aac") || clean.endsWith(".m4a") || clean.endsWith(".wav") || clean.endsWith(".flac") -> MediaType.Audio
         type.startsWith("video/") ||
             type.contains("video/") ||
             clean.endsWith(".mp4") ||
             clean.endsWith(".mov") ||
             clean.endsWith(".webm") ||
             clean.endsWith(".mkv") ||
-            clean.contains("douyinvod") ||
-            clean.contains("/video/tos/") ||
-            clean.contains("playwm") ||
-            clean.contains("/play/") && clean.contains("douyin") -> MediaType.Video
+            looksLikeDouyinVideoUrl(clean) -> MediaType.Video
         clean.endsWith(".m3u8") || clean.endsWith(".mpd") -> MediaType.Playlist
         clean.endsWith(".gif") -> MediaType.Gif
         type.startsWith("image/") ||
@@ -750,7 +863,6 @@ fun classifyMedia(url: String, mime: String = ""): MediaType {
             clean.contains("byteimg") ||
             clean.contains("imagex") ||
             clean.contains("/obj/") && clean.contains("tos") -> MediaType.Image
-        type.startsWith("audio/") || type.contains("audio/") || clean.endsWith(".mp3") || clean.endsWith(".aac") || clean.endsWith(".m4a") || clean.endsWith(".wav") || clean.endsWith(".flac") -> MediaType.Audio
         type.startsWith("text/html") || clean.contains("v.douyin.com") || clean.contains("/share/") -> MediaType.Web
         clean.substringAfterLast('.', "").length in 2..5 -> MediaType.File
         else -> MediaType.Other
@@ -954,6 +1066,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.24"
-private const val CURRENT_VERSION_CODE = 12400
+private const val CURRENT_VERSION_NAME = "1.25"
+private const val CURRENT_VERSION_CODE = 12500
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
