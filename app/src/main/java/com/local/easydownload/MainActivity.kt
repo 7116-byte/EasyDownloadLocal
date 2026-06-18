@@ -173,10 +173,12 @@ private fun EasyDownloadApp(initialText: String) {
 private fun DownloadStartScreen(initialText: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val savedSettings = remember { AppSettings.load(context) }
     var input by remember { mutableStateOf(initialText) }
-    var includeImage by remember { mutableStateOf(true) }
-    var includeVideo by remember { mutableStateOf(true) }
-    var includeAudio by remember { mutableStateOf(false) }
+    var includeImage by remember { mutableStateOf(savedSettings.includeImage) }
+    var includeVideo by remember { mutableStateOf(savedSettings.includeVideo) }
+    var includeAudio by remember { mutableStateOf(savedSettings.includeAudio) }
+    var includePlaylist by remember { mutableStateOf(savedSettings.includePlaylist) }
     var parsing by remember { mutableStateOf(false) }
     var parsed by remember { mutableStateOf<ParsedResult?>(null) }
     val selectedItems = remember { mutableStateListOf<MediaItem>() }
@@ -208,9 +210,22 @@ private fun DownloadStartScreen(initialText: String) {
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None)
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    LabeledCheckBox("图片", includeImage) { includeImage = it }
-                    LabeledCheckBox("视频", includeVideo) { includeVideo = it }
-                    LabeledCheckBox("音频", includeAudio) { includeAudio = it }
+                    LabeledCheckBox("图片", includeImage) {
+                        includeImage = it
+                        AppSettings.save(context, DownloadSettings(includeVideo, includeImage, includeAudio, includePlaylist))
+                    }
+                    LabeledCheckBox("视频", includeVideo) {
+                        includeVideo = it
+                        AppSettings.save(context, DownloadSettings(includeVideo, includeImage, includeAudio, includePlaylist))
+                    }
+                    LabeledCheckBox("音频", includeAudio) {
+                        includeAudio = it
+                        AppSettings.save(context, DownloadSettings(includeVideo, includeImage, includeAudio, includePlaylist))
+                    }
+                    LabeledCheckBox("m3u8", includePlaylist) {
+                        includePlaylist = it
+                        AppSettings.save(context, DownloadSettings(includeVideo, includeImage, includeAudio, includePlaylist))
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { input = "" }) { Text("清空") }
@@ -223,7 +238,8 @@ private fun DownloadStartScreen(initialText: String) {
                                 val result = parsePlatform(input)
                                 val filtered = result.items.filter {
                                     (includeImage && (it.type == MediaType.Image || it.type == MediaType.Gif)) ||
-                                        (includeVideo && (it.type == MediaType.Video || it.type == MediaType.Playlist)) ||
+                                        (includeVideo && it.type == MediaType.Video) ||
+                                        (includePlaylist && it.type == MediaType.Playlist) ||
                                         (includeAudio && it.type == MediaType.Audio) ||
                                         it.type == MediaType.Web ||
                                         it.type == MediaType.File
@@ -425,15 +441,33 @@ private fun TaskCard(task: MediaItem) {
 @Composable
 private fun ToolScreen() {
     val context = LocalContext.current
+    val initialSettings = remember { AppSettings.load(context) }
+    var includeVideo by remember { mutableStateOf(initialSettings.includeVideo) }
+    var includeImage by remember { mutableStateOf(initialSettings.includeImage) }
+    var includeAudio by remember { mutableStateOf(initialSettings.includeAudio) }
+    var includePlaylist by remember { mutableStateOf(initialSettings.includePlaylist) }
+    fun saveSettings() {
+        AppSettings.save(context, DownloadSettings(includeVideo, includeImage, includeAudio, includePlaylist))
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("本地工具", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("悬浮窗", fontWeight = FontWeight.Bold)
-            Text("从其他应用复制链接后，可快速打开解析器。", color = Color(0xFF667085))
+            Text("正常显示“粘”；检测到剪切板链接后显示“待解析链接”。单击按下载范围解析下载，双击打开软件。", color = Color(0xFF667085))
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { startFloatingWindow(context) }) { Text("开启") }
                 OutlinedButton(onClick = { context.stopService(Intent(context, FloatingWindowService::class.java)) }) { Text("关闭") }
+            }
+        }
+        SectionCard {
+            Text("下载范围", fontWeight = FontWeight.Bold)
+            Text("主页解析和悬浮球单击下载都会使用这里的范围。", color = Color(0xFF667085))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LabeledCheckBox("视频", includeVideo) { includeVideo = it; saveSettings() }
+                LabeledCheckBox("图片", includeImage) { includeImage = it; saveSettings() }
+                LabeledCheckBox("音频", includeAudio) { includeAudio = it; saveSettings() }
+                LabeledCheckBox("m3u8", includePlaylist) { includePlaylist = it; saveSettings() }
             }
         }
         ToolGrid(
@@ -457,12 +491,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.23")
+            Text("版本 1.24")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.23", color = Color(0xFF667085))
+            Text("当前版本：1.24", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -560,7 +594,9 @@ private suspend fun parsePlatform(input: String): ParsedResult = withContext(Dis
         val finalUrl = connection.url.toString()
         val title = htmlTitle(html)
         val description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") }
-        val items = buildMediaItems(html, finalUrl, connection.contentType.orEmpty(), title)
+        val items = (buildMediaItems(html, finalUrl, connection.contentType.orEmpty(), title) + buildDouyinItems(html, finalUrl, title))
+            .distinctBy { it.url }
+            .sortedBy { mediaRank(it.type) }
         ParsedResult(url, finalUrl, title, description, items)
     } catch (e: Exception) {
         ParsedResult(url, url, "", "", emptyList(), e.message ?: "网络请求失败")
@@ -572,6 +608,7 @@ fun extractFirstUrl(text: String): String? =
 
 private fun buildMediaItems(html: String, finalUrl: String, mime: String, title: String): List<MediaItem> {
     val values = linkedMapOf<String, String>()
+    val decodedHtml = html.deepUnescape()
     val metaNames = listOf(
         "og:video",
         "og:video:url",
@@ -593,10 +630,80 @@ private fun buildMediaItems(html: String, finalUrl: String, mime: String, title:
         .map { it.value.unescapeUrl() }
         .filter { shouldKeepCandidate(it) }
         .forEach { values.putIfAbsent(it, "页面链接") }
+    Regex("""https?://[^"' <>\n\r\\]+""", RegexOption.IGNORE_CASE)
+        .findAll(decodedHtml)
+        .map { it.value.unescapeUrl() }
+        .filter { shouldKeepCandidate(it) }
+        .forEach { values.putIfAbsent(it.normalizeMediaUrl(), "JSON 资源") }
     values.putIfAbsent(finalUrl, "跳转目标")
     return values.map { (url, source) ->
         MediaItem(url = url, type = classifyMedia(url, if (url == finalUrl) mime else ""), title = title, source = source)
     }.distinctBy { it.url }.sortedBy { mediaRank(it.type) }.take(120)
+}
+
+private fun buildDouyinItems(html: String, finalUrl: String, title: String): List<MediaItem> {
+    if (!finalUrl.contains("douyin", ignoreCase = true) && !html.contains("douyin", ignoreCase = true)) return emptyList()
+    val id = extractDouyinId(finalUrl, html)
+    val sources = mutableListOf<Pair<String, String>>()
+    val decodedHtml = html.deepUnescape()
+    extractMediaUrls(decodedHtml).forEach { sources += it.normalizeMediaUrl() to "抖音页面 JSON" }
+    if (!id.isNullOrBlank()) {
+        fetchDouyinDetailBodies(id).forEach { body ->
+            extractMediaUrls(body.deepUnescape()).forEach { sources += it.normalizeMediaUrl() to "抖音详情接口" }
+        }
+    }
+    return sources
+        .filter { shouldKeepCandidate(it.first) || classifyMedia(it.first) != MediaType.Other }
+        .map { (url, source) ->
+            MediaItem(url = url, type = classifyMedia(url), title = title, source = source)
+        }
+        .distinctBy { it.url }
+        .filter { it.type != MediaType.Web && it.type != MediaType.Other }
+        .take(80)
+}
+
+private fun extractDouyinId(finalUrl: String, html: String): String? {
+    val haystack = "$finalUrl\n${html.deepUnescape()}"
+    val patterns = listOf(
+        Regex("""/video/(\d{8,})"""),
+        Regex("""/note/(\d{8,})"""),
+        Regex("""(?:aweme_id|item_id|itemId|modal_id|group_id)["'=:\s]+(\d{8,})""", RegexOption.IGNORE_CASE),
+        Regex("""(?:aweme_id|item_id|itemId|modal_id|group_id)=([0-9]{8,})""", RegexOption.IGNORE_CASE)
+    )
+    return patterns.firstNotNullOfOrNull { pattern -> pattern.find(haystack)?.groupValues?.getOrNull(1) }
+}
+
+private fun fetchDouyinDetailBodies(awemeId: String): List<String> {
+    val urls = listOf(
+        "https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids=$awemeId",
+        "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=$awemeId&aid=1128&device_platform=webapp&version_name=23.5.0"
+    )
+    return urls.mapNotNull { url ->
+        runCatching {
+            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 12000
+                readTimeout = 15000
+                setRequestProperty("User-Agent", MOBILE_UA)
+                setRequestProperty("Referer", "https://www.douyin.com/video/$awemeId")
+                setRequestProperty("Accept", "application/json,text/plain,*/*")
+            }
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }.getOrNull()
+    }
+}
+
+private fun extractMediaUrls(text: String): List<String> {
+    val urls = Regex("""https?://[^"' <>\n\r\\]+""", RegexOption.IGNORE_CASE)
+        .findAll(text)
+        .map { it.value.trimEnd('\\', ',', '}', ']', ')') }
+        .toList()
+    val focused = urls.filter {
+        shouldKeepCandidate(it) ||
+            it.contains("play_addr", ignoreCase = true) ||
+            it.contains("download_addr", ignoreCase = true) ||
+            it.contains("cover", ignoreCase = true)
+    }
+    return focused.ifEmpty { urls.filter { classifyMedia(it) != MediaType.Web && classifyMedia(it) != MediaType.Other } }
 }
 
 private fun htmlTitle(html: String): String = metaContent(html, "og:title").ifBlank {
@@ -621,11 +728,29 @@ fun classifyMedia(url: String, mime: String = ""): MediaType {
     val clean = Uri.decode(url).lowercase(Locale.US).substringBefore("?")
     val type = mime.lowercase(Locale.US)
     return when {
-        type.startsWith("video/") || clean.endsWith(".mp4") || clean.endsWith(".mov") || clean.endsWith(".webm") || clean.endsWith(".mkv") -> MediaType.Video
+        clean.contains("v.douyin.com") || clean.contains("www.douyin.com") && (clean.contains("/video/") || clean.contains("/note/")) -> MediaType.Web
+        type.startsWith("video/") ||
+            type.contains("video/") ||
+            clean.endsWith(".mp4") ||
+            clean.endsWith(".mov") ||
+            clean.endsWith(".webm") ||
+            clean.endsWith(".mkv") ||
+            clean.contains("douyinvod") ||
+            clean.contains("/video/tos/") ||
+            clean.contains("playwm") ||
+            clean.contains("/play/") && clean.contains("douyin") -> MediaType.Video
         clean.endsWith(".m3u8") || clean.endsWith(".mpd") -> MediaType.Playlist
         clean.endsWith(".gif") -> MediaType.Gif
-        type.startsWith("image/") || clean.endsWith(".jpg") || clean.endsWith(".jpeg") || clean.endsWith(".png") || clean.endsWith(".webp") -> MediaType.Image
-        type.startsWith("audio/") || clean.endsWith(".mp3") || clean.endsWith(".aac") || clean.endsWith(".m4a") || clean.endsWith(".wav") || clean.endsWith(".flac") -> MediaType.Audio
+        type.startsWith("image/") ||
+            type.contains("image/") ||
+            clean.endsWith(".jpg") ||
+            clean.endsWith(".jpeg") ||
+            clean.endsWith(".png") ||
+            clean.endsWith(".webp") ||
+            clean.contains("byteimg") ||
+            clean.contains("imagex") ||
+            clean.contains("/obj/") && clean.contains("tos") -> MediaType.Image
+        type.startsWith("audio/") || type.contains("audio/") || clean.endsWith(".mp3") || clean.endsWith(".aac") || clean.endsWith(".m4a") || clean.endsWith(".wav") || clean.endsWith(".flac") -> MediaType.Audio
         type.startsWith("text/html") || clean.contains("v.douyin.com") || clean.contains("/share/") -> MediaType.Web
         clean.substringAfterLast('.', "").length in 2..5 -> MediaType.File
         else -> MediaType.Other
@@ -678,6 +803,7 @@ fun enqueueMediaDownload(context: Context, item: MediaItem) {
                 .setDescription(item.url)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, item.fileName.safeFileName())
+            mediaHeaders(item.url).forEach { (key, value) -> request.addRequestHeader(key, value) }
             context.getSystemService(DownloadManager::class.java).enqueue(request)
         }.getOrNull()
         item.copy(
@@ -687,6 +813,15 @@ fun enqueueMediaDownload(context: Context, item: MediaItem) {
         )
     }
     TaskStore.add(context, task)
+}
+
+suspend fun resolveDownloadItems(context: Context, text: String): List<MediaItem> {
+    val settings = AppSettings.load(context)
+    val parsed = parsePlatform(text)
+    return parsed.items
+        .filter { settings.allows(it.type) }
+        .distinctBy { it.url }
+        .take(30)
 }
 
 fun openPreview(context: Context, item: MediaItem) {
@@ -749,7 +884,31 @@ fun typeIcon(type: MediaType): String = when (type) {
     MediaType.Other -> "?"
 }
 
-private fun String.unescapeUrl(): String = replace("\\u0026", "&").replace("\\/", "/").replace("&amp;", "&")
+private fun String.unescapeUrl(): String = deepUnescape().replace("&amp;", "&")
+
+private fun String.deepUnescape(): String {
+    var value = this
+    repeat(3) {
+        value = value
+            .replace("\\u0026", "&")
+            .replace("\\u002F", "/")
+            .replace("\\u002f", "/")
+            .replace("\\/", "/")
+            .replace("%5Cu002F", "/", ignoreCase = true)
+            .replace("%5C/", "/", ignoreCase = true)
+            .replace("&amp;", "&")
+    }
+    return value
+}
+
+private fun String.normalizeMediaUrl(): String {
+    val decoded = unescapeUrl()
+    return if (decoded.contains("douyin", ignoreCase = true) || decoded.contains("douyinvod", ignoreCase = true)) {
+        decoded.replace("playwm", "play")
+    } else {
+        decoded
+    }
+}
 
 private fun String.htmlDecode(): String = replace("&amp;", "&")
     .replace("&lt;", "<")
@@ -795,6 +954,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.23"
-private const val CURRENT_VERSION_CODE = 12300
+private const val CURRENT_VERSION_NAME = "1.24"
+private const val CURRENT_VERSION_CODE = 12400
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"

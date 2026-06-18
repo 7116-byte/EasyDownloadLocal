@@ -7,11 +7,15 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.MediaController
-import android.widget.HorizontalScrollView
 import android.widget.TextView
 import android.widget.VideoView
 import androidx.activity.ComponentActivity
@@ -30,14 +34,13 @@ class PreviewActivity : ComponentActivity() {
     }
 
     private fun buildLayout(): View {
-        val root = LinearLayout(this).apply {
+        return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
+            addView(buildTopBar())
+            addView(buildPreview(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(buildBottomMenu())
         }
-        root.addView(buildTopBar())
-        root.addView(buildPreview(), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        root.addView(buildBottomMenu())
-        return root
     }
 
     private fun buildTopBar(): View {
@@ -64,53 +67,63 @@ class PreviewActivity : ComponentActivity() {
         }
     }
 
-    private fun buildPreview(): View {
-        return when (mediaType) {
-            MediaType.Video, MediaType.Audio, MediaType.Playlist -> buildVideoPreview()
-            MediaType.Image, MediaType.Gif -> buildImagePreview()
-            else -> buildFallbackPreview()
-        }
+    private fun buildPreview(): View = when (mediaType) {
+        MediaType.Video, MediaType.Audio, MediaType.Playlist -> buildVideoPreview()
+        MediaType.Image, MediaType.Gif -> buildImagePreview()
+        MediaType.Web -> buildWebPreview()
+        else -> buildFallbackPreview()
     }
 
     private fun buildVideoPreview(): View {
-        return VideoView(this).apply {
+        val container = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val fallback = buildFallbackPreview().apply { visibility = View.GONE }
+        val videoView = VideoView(this).apply {
             setBackgroundColor(Color.BLACK)
             setMediaController(MediaController(this@PreviewActivity).also { it.setAnchorView(this) })
+            setOnPreparedListener { player ->
+                fallback.visibility = View.GONE
+                player.isLooping = false
+            }
             setOnErrorListener { _, _, _ ->
-                toast(this@PreviewActivity, "无法直接预览，请用浏览器打开")
+                fallback.visibility = View.VISIBLE
                 true
             }
             runCatching {
-                setVideoURI(Uri.parse(url))
+                setVideoURI(Uri.parse(url), mediaHeaders(url))
                 start()
             }.onFailure {
-                toast(this@PreviewActivity, "无法直接预览，请用浏览器打开")
+                fallback.visibility = View.VISIBLE
             }
         }
+        container.addView(videoView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        container.addView(fallback, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        return container
     }
 
     private fun buildImagePreview(): View {
-        val escaped = url.replace("&", "&amp;").replace("\"", "&quot;")
-        val html = """
-            <!doctype html>
-            <html>
-            <head>
-              <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=8.0, user-scalable=yes">
-              <style>
-                html,body{margin:0;height:100%;background:#000;display:flex;align-items:center;justify-content:center;}
-                img{max-width:100%;max-height:100%;object-fit:contain;}
-              </style>
-            </head>
-            <body><img src="$escaped"></body>
-            </html>
-        """.trimIndent()
         return WebView(this).apply {
             setBackgroundColor(Color.BLACK)
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+            }
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
             settings.loadWithOverviewMode = true
             settings.useWideViewPort = true
-            loadDataWithBaseURL(url, html, "text/html", "UTF-8", null)
+            settings.javaScriptEnabled = true
+            loadUrl(this@PreviewActivity.url, mediaHeaders(this@PreviewActivity.url))
+        }
+    }
+
+    private fun buildWebPreview(): View {
+        return WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            webChromeClient = WebChromeClient()
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            loadUrl(this@PreviewActivity.url, mediaHeaders(this@PreviewActivity.url))
         }
     }
 
@@ -119,8 +132,9 @@ class PreviewActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.BLACK)
             addView(TextView(this@PreviewActivity).apply {
-                text = "此资源无法在应用内直接预览"
+                text = "此资源无法直接预览"
                 setTextColor(Color.WHITE)
                 textSize = 18f
                 gravity = Gravity.CENTER
@@ -140,15 +154,11 @@ class PreviewActivity : ComponentActivity() {
     }
 
     private fun buildBottomMenu(): View {
-        val scrollView = HorizontalScrollView(this).apply {
-            setBackgroundColor(0xEE101010.toInt())
-        }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(10, 10, 10, 14)
         }
-        scrollView.addView(row)
         row.addAction("下载") {
             enqueueMediaDownload(this, MediaItem(url = url, type = mediaType, title = titleText, source = "预览页"))
             toast(this, "已加入下载任务")
@@ -167,7 +177,10 @@ class PreviewActivity : ComponentActivity() {
             row.addAction("取帧") { toast(this, "本地工具开发中") }
         }
         row.addAction("更多") { toast(this, "更多本地工具开发中") }
-        return scrollView
+        return HorizontalScrollView(this).apply {
+            setBackgroundColor(0xEE101010.toInt())
+            addView(row)
+        }
     }
 
     private fun LinearLayout.addAction(label: String, action: () -> Unit) {
@@ -183,7 +196,10 @@ class PreviewActivity : ComponentActivity() {
         toast(this, "正在设置壁纸")
         Thread {
             val ok = runCatching {
-                URL(url).openStream().use { stream ->
+                URL(url).openConnection().apply {
+                    setRequestProperty("User-Agent", PREVIEW_UA)
+                    setRequestProperty("Referer", refererFor(this@PreviewActivity.url))
+                }.getInputStream().use { stream ->
                     val bitmap = BitmapFactory.decodeStream(stream)
                     WallpaperManager.getInstance(this).setBitmap(bitmap)
                 }
@@ -192,3 +208,17 @@ class PreviewActivity : ComponentActivity() {
         }.start()
     }
 }
+
+fun mediaHeaders(url: String): Map<String, String> = mapOf(
+    "User-Agent" to PREVIEW_UA,
+    "Referer" to refererFor(url),
+    "Accept" to "*/*"
+)
+
+fun refererFor(url: String): String = when {
+    url.contains("douyin", ignoreCase = true) || url.contains("douyinvod", ignoreCase = true) || url.contains("byteimg", ignoreCase = true) -> "https://www.douyin.com/"
+    else -> Uri.parse(url).let { "${it.scheme}://${it.host}/" }
+}
+
+private const val PREVIEW_UA =
+    "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
