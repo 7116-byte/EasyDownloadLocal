@@ -40,6 +40,11 @@ object TaskStore {
         save(context, emptyList())
     }
 
+    fun removeUrls(context: Context, urls: Set<String>) {
+        if (urls.isEmpty()) return
+        save(context, load(context).filterNot { it.url in urls })
+    }
+
     private fun save(context: Context, items: List<MediaItem>) {
         val raw = items.joinToString("\n") { item ->
             listOf(

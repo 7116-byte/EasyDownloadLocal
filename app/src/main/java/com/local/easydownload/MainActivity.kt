@@ -443,29 +443,79 @@ private fun NetworkThumbnail(url: String, modifier: Modifier = Modifier) {
 private fun DownloadTaskScreen() {
     val context = LocalContext.current
     val tasks = remember { mutableStateListOf<MediaItem>() }
-    LaunchedEffect(Unit) {
+    val selectedUrls = remember { mutableStateListOf<String>() }
+    fun reloadTasks() {
         tasks.clear()
         tasks.addAll(TaskStore.load(context))
+        selectedUrls.removeAll { selected -> tasks.none { it.url == selected } }
+    }
+    LaunchedEffect(Unit) {
+        reloadTasks()
     }
     LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text("下载任务", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text("显示本地任务状态、类型、进度和系统下载器提交结果。", color = Color(0xFF667085))
         }
+        item {
+            SectionCard {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LabeledCheckBox("全选", tasks.isNotEmpty() && selectedUrls.size == tasks.size) { checked ->
+                        selectedUrls.clear()
+                        if (checked) selectedUrls.addAll(tasks.map { it.url })
+                    }
+                    Text("已选 ${selectedUrls.size} / ${tasks.size}", color = Color(0xFF667085), modifier = Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        enabled = selectedUrls.isNotEmpty(),
+                        onClick = {
+                            TaskStore.removeUrls(context, selectedUrls.toSet())
+                            selectedUrls.clear()
+                            reloadTasks()
+                            toast(context, "已删除选中任务")
+                        }
+                    ) { Text("删除选中") }
+                    OutlinedButton(
+                        enabled = tasks.isNotEmpty(),
+                        onClick = {
+                            TaskStore.clear(context)
+                            selectedUrls.clear()
+                            reloadTasks()
+                            toast(context, "已清空任务")
+                        }
+                    ) { Text("清空任务") }
+                    OutlinedButton(onClick = { reloadTasks() }) { Text("刷新") }
+                }
+            }
+        }
         if (tasks.isEmpty()) {
             item { SectionCard { Text("暂无任务，从首页解析并下载选中内容后会显示在这里。") } }
         }
-        items(tasks) { task -> TaskCard(task) }
+        items(tasks) { task ->
+            TaskCard(
+                task = task,
+                selected = task.url in selectedUrls,
+                onSelectedChange = { checked ->
+                    if (checked) {
+                        if (task.url !in selectedUrls) selectedUrls.add(task.url)
+                    } else {
+                        selectedUrls.remove(task.url)
+                    }
+                }
+            )
+        }
     }
 }
 
 @Composable
-private fun TaskCard(task: MediaItem) {
+private fun TaskCard(task: MediaItem, selected: Boolean, onSelectedChange: (Boolean) -> Unit) {
     val thumbUrl = task.coverUrl.ifBlank {
         if (task.type == MediaType.Image || task.type == MediaType.Gif) task.url else ""
     }
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = selected, onCheckedChange = onSelectedChange)
             Box(
                 modifier = Modifier.size(58.dp).background(Color(0xFFEFF3F6), RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
@@ -518,7 +568,7 @@ private fun ToolScreen() {
         Text("本地工具", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("悬浮窗", fontWeight = FontWeight.Bold)
-            Text("正常显示“粘”；检测到剪切板链接后显示“待解析链接”。单击按下载范围解析下载，双击打开软件。", color = Color(0xFF667085))
+            Text("正常显示“粘”；检测到剪切板链接后显示“待解析链接”。单击解析并提示结果，双击下载，长按打开软件。", color = Color(0xFF667085))
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { startFloatingWindow(context) }) { Text("开启") }
@@ -556,12 +606,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.30")
+            Text("版本 1.31")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.30", color = Color(0xFF667085))
+            Text("当前版本：1.31", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -1219,11 +1269,13 @@ fun enqueueMediaDownload(context: Context, item: MediaItem) {
         item.copy(status = "播放列表待处理", progress = 0, speed = "m3u8")
     } else {
         val id = runCatching {
+            val outputName = item.fileName.safeFileName()
             val request = DownloadManager.Request(Uri.parse(item.url))
-                .setTitle(item.fileName)
+                .setTitle(outputName)
                 .setDescription(item.url)
+                .setMimeType(mimeTypeFor(item.type))
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, item.fileName.safeFileName())
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, outputName)
             mediaHeaders(item.url).forEach { (key, value) -> request.addRequestHeader(key, value) }
             context.getSystemService(DownloadManager::class.java).enqueue(request)
         }.getOrNull()
@@ -1283,7 +1335,7 @@ private fun versionCodeFromTag(tag: String): Int {
 
 fun fileNameFor(url: String, type: MediaType): String {
     val decoded = runCatching { Uri.decode(url) }.getOrElse { url }
-    val last = decoded.substringBefore("?").trimEnd('/').substringAfterLast('/')
+    val last = decoded.substringBefore("?").trimEnd('/').substringAfterLast('/').substringBefore("#")
     val fallbackExt = when (type) {
         MediaType.Video -> ".mp4"
         MediaType.Image -> ".jpg"
@@ -1292,7 +1344,13 @@ fun fileNameFor(url: String, type: MediaType): String {
         MediaType.Playlist -> ".m3u8"
         else -> ""
     }
-    return last.takeIf { it.isNotBlank() && it.length < 90 } ?: "resource-${System.currentTimeMillis()}$fallbackExt"
+    val base = last
+        .takeIf { it.isNotBlank() && it.length < 90 && !it.contains("=") && !it.contains("&") }
+        ?: "resource-${System.currentTimeMillis()}"
+    val cleanBase = base.substringBefore("?").trimEnd('.', '_', '-')
+    val ext = cleanBase.substringAfterLast('.', "").lowercase(Locale.US)
+    val knownExts = setOf("mp4", "mov", "webm", "mkv", "jpg", "jpeg", "png", "webp", "gif", "mp3", "aac", "m4a", "wav", "flac", "m3u8")
+    return if (fallbackExt.isNotBlank() && ext !in knownExts) "$cleanBase$fallbackExt" else cleanBase
 }
 
 fun typeIcon(type: MediaType): String = when (type) {
@@ -1338,8 +1396,27 @@ private fun String.htmlDecode(): String = replace("&amp;", "&")
     .replace("&quot;", "\"")
     .replace("&#39;", "'")
 
-fun String.safeFileName(): String = replace(Regex("""[\\/:*?"<>|]"""), "_").take(80).ifBlank {
-    SimpleDateFormat("'download-'yyyyMMdd-HHmmss", Locale.US).format(Date())
+fun String.safeFileName(): String {
+    val sanitized = replace(Regex("""[\\/:*?"<>|]"""), "_").ifBlank {
+        SimpleDateFormat("'download-'yyyyMMdd-HHmmss", Locale.US).format(Date())
+    }
+    if (sanitized.length <= 80) return sanitized
+    val ext = sanitized.substringAfterLast('.', "").takeIf { it.length in 2..5 }
+    return if (ext == null) {
+        sanitized.take(80)
+    } else {
+        sanitized.substringBeforeLast('.').take(80 - ext.length - 1).trimEnd('.', '_', '-') + ".$ext"
+    }
+}
+
+fun mimeTypeFor(type: MediaType): String = when (type) {
+    MediaType.Video -> "video/mp4"
+    MediaType.Image -> "image/jpeg"
+    MediaType.Gif -> "image/gif"
+    MediaType.Audio -> "audio/mpeg"
+    MediaType.Playlist -> "application/vnd.apple.mpegurl"
+    MediaType.Web -> "text/html"
+    else -> "application/octet-stream"
 }
 
 private fun clipboardText(context: Context): String =
@@ -1377,6 +1454,6 @@ const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 const val EXTRA_SIZE = "com.local.easydownload.SIZE"
 
-private const val CURRENT_VERSION_NAME = "1.30"
-private const val CURRENT_VERSION_CODE = 13000
+private const val CURRENT_VERSION_NAME = "1.31"
+private const val CURRENT_VERSION_CODE = 13100
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"

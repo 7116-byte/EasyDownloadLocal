@@ -34,6 +34,10 @@ class FloatingWindowService : Service() {
     private var startY = 0
     private var lastTapTime = 0L
     private var pendingSingleTap: Runnable? = null
+    private var pendingLongPress: Runnable? = null
+    private var longPressTriggered = false
+    private var lastParsedText = ""
+    private var lastParsedItems: List<MediaItem> = emptyList()
 
     private val clipboardPoller = object : Runnable {
         override fun run() {
@@ -106,12 +110,21 @@ class FloatingWindowService : Service() {
                     downY = event.rawY
                     startX = params.x
                     startY = params.y
+                    longPressTriggered = false
+                    pendingLongPress = Runnable {
+                        longPressTriggered = true
+                        pendingSingleTap?.let { handler.removeCallbacks(it) }
+                        pendingSingleTap = null
+                        openMainWithClipboard()
+                    }.also { handler.postDelayed(it, 650) }
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
                     if (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6) {
+                        pendingLongPress?.let { handler.removeCallbacks(it) }
+                        pendingLongPress = null
                         params.x = startX + dx.toInt()
                         params.y = startY + dy.toInt()
                         windowManager?.updateViewLayout(root, params)
@@ -119,8 +132,10 @@ class FloatingWindowService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    pendingLongPress?.let { handler.removeCallbacks(it) }
+                    pendingLongPress = null
                     val moved = kotlin.math.abs(event.rawX - downX) > 10 || kotlin.math.abs(event.rawY - downY) > 10
-                    if (!moved) handleTap()
+                    if (!moved && !longPressTriggered) handleTap()
                     true
                 }
                 else -> true
@@ -137,11 +152,11 @@ class FloatingWindowService : Service() {
             pendingSingleTap?.let { handler.removeCallbacks(it) }
             pendingSingleTap = null
             lastTapTime = 0L
-            openMainWithClipboard()
+            downloadParsedClipboard()
             return
         }
         lastTapTime = now
-        val runnable = Runnable { quickDownloadClipboard() }
+        val runnable = Runnable { parseClipboardOnly() }
         pendingSingleTap = runnable
         handler.postDelayed(runnable, 380)
     }
@@ -151,23 +166,66 @@ class FloatingWindowService : Service() {
         subtitleView?.text = if (extractFirstUrl(lastClipboardText) == null) "" else "待解析链接"
     }
 
-    private fun quickDownloadClipboard() {
+    private fun parseClipboardOnly() {
         refreshClipboardState()
         val text = lastClipboardText
         if (extractFirstUrl(text) == null) {
             Toast.makeText(this, "剪贴板没有链接", Toast.LENGTH_SHORT).show()
             return
         }
-        Toast.makeText(this, "正在解析剪贴板链接", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "正在解析链接", Toast.LENGTH_SHORT).show()
         scope.launch {
             val items = withContext(Dispatchers.IO) { resolveDownloadItems(this@FloatingWindowService, text) }
+            lastParsedText = text
+            lastParsedItems = items
             if (items.isEmpty()) {
-                Toast.makeText(this@FloatingWindowService, "未解析到设置范围内的媒体，请双击打开软件查看", Toast.LENGTH_LONG).show()
+                subtitleView?.text = "未解析到"
+                Toast.makeText(this@FloatingWindowService, "未解析到媒体，长按打开软件查看", Toast.LENGTH_LONG).show()
             } else {
-                items.forEach { enqueueMediaDownload(this@FloatingWindowService, it) }
-                Toast.makeText(this@FloatingWindowService, "已加入 ${items.size} 个下载任务", Toast.LENGTH_SHORT).show()
+                val summary = summarizeItems(items)
+                subtitleView?.text = summary
+                Toast.makeText(this@FloatingWindowService, "解析到 $summary，双击下载", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private fun downloadParsedClipboard() {
+        refreshClipboardState()
+        val text = lastClipboardText
+        if (extractFirstUrl(text) == null) {
+            Toast.makeText(this, "剪贴板没有链接", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch {
+            val items = if (text == lastParsedText && lastParsedItems.isNotEmpty()) {
+                lastParsedItems
+            } else {
+                Toast.makeText(this@FloatingWindowService, "正在解析并下载", Toast.LENGTH_SHORT).show()
+                withContext(Dispatchers.IO) { resolveDownloadItems(this@FloatingWindowService, text) }.also {
+                    lastParsedText = text
+                    lastParsedItems = it
+                }
+            }
+            if (items.isEmpty()) {
+                Toast.makeText(this@FloatingWindowService, "未解析到媒体，长按打开软件查看", Toast.LENGTH_LONG).show()
+            } else {
+                items.forEach { enqueueMediaDownload(this@FloatingWindowService, it) }
+                Toast.makeText(this@FloatingWindowService, "已下载 ${summarizeItems(items)}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun summarizeItems(items: List<MediaItem>): String {
+        return items.groupBy { item ->
+            when (item.type) {
+                MediaType.Video -> "MP4"
+                MediaType.Image -> "JPG"
+                MediaType.Gif -> "GIF"
+                MediaType.Audio -> "MP3"
+                MediaType.Playlist -> "M3U8"
+                else -> item.type.label
+            }
+        }.entries.joinToString(" / ") { "${it.value.size} 个${it.key}" }
     }
 
     private fun openMainWithClipboard() {
