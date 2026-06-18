@@ -314,6 +314,17 @@ private fun DownloadStartScreen(initialText: String) {
                         }
                     )
                 }
+            } else if (result.error == null) {
+                item {
+                    SectionCard {
+                        Text("未直接解析到可下载媒体", color = Color(0xFFC62828), fontWeight = FontWeight.Bold)
+                        Text("平台可能只返回了风控页或脚本占位页。可以进入任意门，等待网页播放后再获取素材。", color = Color(0xFF667085))
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = {
+                            context.startActivity(Intent(context, SnifferActivity::class.java).putExtra(EXTRA_URL, result.finalUrl.ifBlank { result.inputUrl }))
+                        }) { Text("打开任意门嗅探") }
+                    }
+                }
             }
         }
         item {
@@ -537,12 +548,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.26")
+            Text("版本 1.27")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.26", color = Color(0xFF667085))
+            Text("当前版本：1.27", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -635,8 +646,13 @@ private suspend fun parsePlatform(input: String): ParsedResult = withContext(Dis
             readTimeout = 20000
             setRequestProperty("User-Agent", MOBILE_UA)
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
+            setRequestProperty("Referer", "https://www.douyin.com/")
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
         }
-        val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val stream = runCatching { connection.inputStream }.getOrElse { error ->
+            connection.errorStream ?: throw error
+        }
+        val html = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         val finalUrl = connection.url.toString()
         val title = htmlTitle(html)
         val description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") }
@@ -782,14 +798,47 @@ private fun extractDouyinStructuredMedia(text: String, source: String): List<Ext
             }
         }
     }
-    if (result.isEmpty()) {
+    extractDouyinKeyedMedia(text, source).forEach { result.putIfAbsent(it.url, it) }
+    if (result.none { it.value.type == MediaType.Video || it.value.type == MediaType.Image || it.value.type == MediaType.Gif }) {
         extractDouyinMediaCandidates(text, source).forEach {
-            if (it.type == MediaType.Image || it.type == MediaType.Gif || (it.type == MediaType.Video && isHighConfidenceVideoUrl(it.url))) {
-                result[it.url] = it
-            }
+            if (it.type == MediaType.Image || it.type == MediaType.Gif || (it.type == MediaType.Video && isHighConfidenceVideoUrl(it.url))) result.putIfAbsent(it.url, it)
         }
     }
     return result.values.toList()
+}
+
+private fun extractDouyinKeyedMedia(text: String, source: String): List<ExtractedMediaUrl> {
+    val result = linkedMapOf<String, ExtractedMediaUrl>()
+    val decoded = text.deepUnescape()
+    extractUrlsNearKeys(decoded, listOf("play_addr", "download_addr", "play_addr_h264", "play_addr_265"), 2600).forEach { raw ->
+        val url = raw.normalizeMediaUrl()
+        if (isHighConfidenceVideoUrl(url)) result[url] = ExtractedMediaUrl(url, MediaType.Video, source)
+    }
+    extractUrlsNearKeys(decoded, listOf("cover", "origin_cover", "dynamic_cover", "animated_cover", "display_image", "images"), 1800).forEach { raw ->
+        val url = raw.normalizeMediaUrl()
+        if (looksLikeCoverUrl(url)) result[url] = ExtractedMediaUrl(url, classifyImageOrGif(url), source)
+    }
+    extractUrlsNearKeys(decoded, listOf("music", "play_url"), 1400).forEach { raw ->
+        val url = raw.normalizeMediaUrl()
+        if (looksLikeAudioUrl(url)) result[url] = ExtractedMediaUrl(url, MediaType.Audio, source)
+    }
+    val cover = result.values.firstOrNull { it.type == MediaType.Image || it.type == MediaType.Gif }?.url.orEmpty()
+    return result.values.map {
+        if (it.type == MediaType.Video && it.coverUrl.isBlank() && cover.isNotBlank()) it.copy(coverUrl = cover) else it
+    }
+}
+
+private fun extractUrlsNearKeys(text: String, keys: List<String>, window: Int): List<String> {
+    val urls = linkedSetOf<String>()
+    keys.forEach { key ->
+        Regex(""""${Regex.escape(key)}"\s*[:=]""", RegexOption.IGNORE_CASE).findAll(text).forEach { match ->
+            val chunk = text.substring(match.range.first, (match.range.last + window).coerceAtMost(text.length))
+            Regex("""https?://[^"' <>\n\r\\]+""", RegexOption.IGNORE_CASE)
+                .findAll(chunk)
+                .forEach { urls += it.value.trimEnd('\\', ',', '}', ']', ')') }
+        }
+    }
+    return urls.toList()
 }
 
 private fun extractJsonDocuments(text: String): List<String> {
@@ -1235,6 +1284,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.26"
-private const val CURRENT_VERSION_CODE = 12600
+private const val CURRENT_VERSION_NAME = "1.27"
+private const val CURRENT_VERSION_CODE = 12700
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
