@@ -548,12 +548,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.27")
+            Text("版本 1.28")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.27", color = Color(0xFF667085))
+            Text("当前版本：1.28", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -852,9 +852,9 @@ private fun extractJsonDocuments(text: String): List<String> {
     Regex("""<script[^>]*id=["']__UNIVERSAL_DATA_FOR_REHYDRATION__["'][^>]*>(.*?)</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
         .findAll(text)
         .forEach { docs += it.groupValues[1].trim().deepUnescape() }
-    Regex("""window\.__INITIAL_STATE__\s*=\s*(\{.*?})\s*</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    Regex("""window\.__INITIAL_STATE__\s*=\s*([\s\S]*?)\s*</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
         .findAll(text)
-        .forEach { docs += it.groupValues[1].trim().deepUnescape() }
+        .forEach { docs += it.groupValues[1].trim().trimEnd(';').deepUnescape() }
     val trimmed = text.trim()
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) docs += trimmed.deepUnescape()
     return docs.distinct().take(10)
@@ -1284,6 +1284,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.27"
-private const val CURRENT_VERSION_CODE = 12700
+private const val CURRENT_VERSION_NAME = "1.28"
+private const val CURRENT_VERSION_CODE = 12800
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
