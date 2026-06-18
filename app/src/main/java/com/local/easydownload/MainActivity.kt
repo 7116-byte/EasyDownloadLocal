@@ -548,12 +548,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.28")
+            Text("版本 1.29")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.28", color = Color(0xFF667085))
+            Text("当前版本：1.29", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -752,6 +752,7 @@ private fun buildDouyinItems(html: String, finalUrl: String, title: String): Lis
             )
         }
         .distinctBy { it.url }
+        .collapseDuplicateDouyinVideos()
         .take(30)
 }
 
@@ -934,6 +935,32 @@ private fun addVideoUrl(raw: String, source: String, cover: String, result: Muta
     if (url.startsWith("http") && !looksLikeAudioUrl(url) && isHighConfidenceVideoUrl(url)) {
         result[url] = ExtractedMediaUrl(url, MediaType.Video, source, coverUrl = cover)
     }
+}
+
+private fun List<MediaItem>.collapseDuplicateDouyinVideos(): List<MediaItem> {
+    val videos = filter { it.type == MediaType.Video }
+    if (videos.size <= 1) return this
+    val nonVideos = filterNot { it.type == MediaType.Video }
+    val groupedVideos = videos
+        .groupBy { it.coverUrl.ifBlank { it.title.ifBlank { "douyin-video" } } }
+        .values
+        .map { group -> group.maxByOrNull { videoQualityScore(it.url, it.source) } ?: group.first() }
+    return (groupedVideos + nonVideos).sortedBy { mediaRank(it.type) }
+}
+
+private fun videoQualityScore(url: String, source: String): Int {
+    val clean = url.lowercase(Locale.US)
+    var score = 0
+    if (source.contains("详情接口")) score += 20
+    if (clean.contains("download")) score += 80
+    if (clean.contains("play_addr")) score += 60
+    if (clean.contains("mime_type=video")) score += 30
+    if (clean.contains("ratio=1080p") || clean.contains("1080")) score += 15
+    if (clean.contains("720")) score += 10
+    if (clean.contains("playwm")) score -= 20
+    if (clean.contains("watermark")) score -= 20
+    if (looksLikeAudioUrl(clean)) score -= 1000
+    return score
 }
 
 private fun extractJsonUrls(value: Any?): List<String> {
@@ -1284,6 +1311,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.28"
-private const val CURRENT_VERSION_CODE = 12800
+private const val CURRENT_VERSION_NAME = "1.29"
+private const val CURRENT_VERSION_CODE = 12900
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"

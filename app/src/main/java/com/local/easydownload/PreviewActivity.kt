@@ -15,13 +15,23 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import android.widget.MediaController
 import android.widget.TextView
-import android.widget.VideoView
 import androidx.activity.ComponentActivity
+import androidx.media3.common.MediaItem as PlayerMediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.dash.DashMediaSource
+import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.PlayerView
 import java.net.URL
 
 class PreviewActivity : ComponentActivity() {
+    private var player: ExoPlayer? = null
     private val url: String by lazy { intent.getStringExtra(EXTRA_URL).orEmpty() }
     private val titleText: String by lazy { intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "媒体预览" } }
     private val mediaType: MediaType by lazy {
@@ -31,6 +41,17 @@ class PreviewActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
+    }
+
+    override fun onStop() {
+        player?.pause()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        player?.release()
+        player = null
+        super.onDestroy()
     }
 
     private fun buildLayout(): View {
@@ -77,27 +98,48 @@ class PreviewActivity : ComponentActivity() {
     private fun buildVideoPreview(): View {
         val container = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val fallback = buildFallbackPreview().apply { visibility = View.GONE }
-        val videoView = VideoView(this).apply {
+        val playerView = PlayerView(this).apply {
             setBackgroundColor(Color.BLACK)
-            setMediaController(MediaController(this@PreviewActivity).also { it.setAnchorView(this) })
-            setOnPreparedListener { player ->
-                fallback.visibility = View.GONE
-                player.isLooping = false
-            }
-            setOnErrorListener { _, _, _ ->
-                fallback.visibility = View.VISIBLE
-                true
-            }
-            runCatching {
-                setVideoURI(Uri.parse(url), mediaHeaders(url))
-                start()
-            }.onFailure {
-                fallback.visibility = View.VISIBLE
-            }
+            useController = true
+            controllerShowTimeoutMs = 5000
         }
-        container.addView(videoView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        container.addView(playerView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         container.addView(fallback, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        runCatching {
+            val exoPlayer = ExoPlayer.Builder(this).build()
+            player = exoPlayer
+            playerView.player = exoPlayer
+            exoPlayer.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) fallback.visibility = View.GONE
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    fallback.visibility = View.VISIBLE
+                }
+            })
+            exoPlayer.setMediaSource(buildMediaSource(url))
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
+        }.onFailure {
+            fallback.visibility = View.VISIBLE
+        }
         return container
+    }
+
+    private fun buildMediaSource(sourceUrl: String): MediaSource {
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(PREVIEW_UA)
+            .setDefaultRequestProperties(mediaHeaders(sourceUrl))
+            .setAllowCrossProtocolRedirects(true)
+        val dataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
+        val mediaItem = PlayerMediaItem.fromUri(Uri.parse(sourceUrl))
+        val clean = sourceUrl.substringBefore("?").lowercase()
+        return when {
+            clean.endsWith(".m3u8") -> HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+            clean.endsWith(".mpd") -> DashMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+            else -> ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        }
     }
 
     private fun buildImagePreview(): View {
