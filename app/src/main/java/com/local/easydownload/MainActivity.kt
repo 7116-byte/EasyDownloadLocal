@@ -69,8 +69,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -135,7 +138,8 @@ private data class UpdateInfo(
 private data class ExtractedMediaUrl(
     val url: String,
     val type: MediaType,
-    val source: String
+    val source: String,
+    val coverUrl: String = ""
 )
 
 private val AppColors = lightColorScheme(
@@ -248,9 +252,7 @@ private fun DownloadStartScreen(initialText: String) {
                                     (includeImage && (it.type == MediaType.Image || it.type == MediaType.Gif)) ||
                                         (includeVideo && it.type == MediaType.Video) ||
                                         (includePlaylist && it.type == MediaType.Playlist) ||
-                                        (includeAudio && it.type == MediaType.Audio) ||
-                                        it.type == MediaType.Web ||
-                                        it.type == MediaType.File
+                                        (includeAudio && it.type == MediaType.Audio)
                                 }
                                 parsed = result.copy(items = filtered)
                                 selectedItems.clear()
@@ -535,12 +537,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.25")
+            Text("版本 1.26")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.25", color = Color(0xFF667085))
+            Text("当前版本：1.26", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -638,9 +640,12 @@ private suspend fun parsePlatform(input: String): ParsedResult = withContext(Dis
         val finalUrl = connection.url.toString()
         val title = htmlTitle(html)
         val description = metaContent(html, "description").ifBlank { metaContent(html, "og:description") }
-        val items = (buildMediaItems(html, finalUrl, connection.contentType.orEmpty(), title) + buildDouyinItems(html, finalUrl, title))
-            .distinctBy { it.url }
-            .sortedBy { mediaRank(it.type) }
+        val douyin = buildDouyinItems(html, finalUrl, title)
+        val items = if (isDouyinContent(finalUrl, html)) {
+            douyin
+        } else {
+            buildMediaItems(html, finalUrl, connection.contentType.orEmpty(), title)
+        }.distinctBy { it.url }.sortedBy { mediaRank(it.type) }
         ParsedResult(url, finalUrl, title, description, items)
     } catch (e: Exception) {
         ParsedResult(url, url, "", "", emptyList(), e.message ?: "网络请求失败")
@@ -700,21 +705,22 @@ private fun buildMediaItems(html: String, finalUrl: String, mime: String, title:
 }
 
 private fun buildDouyinItems(html: String, finalUrl: String, title: String): List<MediaItem> {
-    if (!finalUrl.contains("douyin", ignoreCase = true) && !html.contains("douyin", ignoreCase = true)) return emptyList()
+    if (!isDouyinContent(finalUrl, html)) return emptyList()
     val id = extractDouyinId(finalUrl, html)
-    val sources = mutableListOf<ExtractedMediaUrl>()
+    val sources = linkedMapOf<String, ExtractedMediaUrl>()
     val decodedHtml = html.deepUnescape()
-    sources += extractDouyinMediaCandidates(decodedHtml, "抖音页面 JSON")
+    extractDouyinStructuredMedia(decodedHtml, "抖音页面数据").forEach { sources[it.url] = it }
     if (!id.isNullOrBlank()) {
         fetchDouyinDetailBodies(id).forEach { body ->
-            sources += extractDouyinMediaCandidates(body.deepUnescape(), "抖音详情接口")
+            extractDouyinStructuredMedia(body.deepUnescape(), "抖音详情接口").forEach { sources[it.url] = it }
         }
     }
-    val coverUrl = sources.firstOrNull { it.type == MediaType.Image && looksLikeCoverUrl(it.url) }?.url
-        ?: sources.firstOrNull { it.type == MediaType.Image }?.url.orEmpty()
-    return sources
+    val fallbackCover = sources.values.firstOrNull { it.type == MediaType.Image && looksLikeCoverUrl(it.url) }?.url
+        ?: sources.values.firstOrNull { it.type == MediaType.Image }?.url.orEmpty()
+    return sources.values
         .filter { it.type != MediaType.Web && it.type != MediaType.Other }
         .filterNot { it.type == MediaType.Video && looksLikeAudioUrl(it.url) }
+        .filterNot { it.type == MediaType.Video && !isHighConfidenceVideoUrl(it.url) }
         .map { extracted ->
             MediaItem(
                 url = extracted.url,
@@ -723,13 +729,14 @@ private fun buildDouyinItems(html: String, finalUrl: String, title: String): Lis
                 source = extracted.source,
                 coverUrl = when {
                     extracted.type == MediaType.Image || extracted.type == MediaType.Gif -> extracted.url
-                    coverUrl.isNotBlank() -> coverUrl
+                    extracted.coverUrl.isNotBlank() -> extracted.coverUrl
+                    fallbackCover.isNotBlank() -> fallbackCover
                     else -> ""
                 }
             )
         }
         .distinctBy { it.url }
-        .take(80)
+        .take(30)
 }
 
 private fun extractDouyinId(finalUrl: String, html: String): String? {
@@ -761,6 +768,153 @@ private fun fetchDouyinDetailBodies(awemeId: String): List<String> {
         }.getOrNull()
     }
 }
+
+private fun isDouyinContent(url: String, html: String): Boolean =
+    url.contains("douyin", ignoreCase = true) || html.contains("douyin", ignoreCase = true) || html.contains("aweme", ignoreCase = true)
+
+private fun extractDouyinStructuredMedia(text: String, source: String): List<ExtractedMediaUrl> {
+    val result = linkedMapOf<String, ExtractedMediaUrl>()
+    extractJsonDocuments(text).forEach { json ->
+        runCatching {
+            when {
+                json.trim().startsWith("{") -> collectDouyinFromJson(JSONObject(json), source, result)
+                json.trim().startsWith("[") -> collectDouyinFromJson(JSONArray(json), source, result)
+            }
+        }
+    }
+    if (result.isEmpty()) {
+        extractDouyinMediaCandidates(text, source).forEach {
+            if (it.type == MediaType.Image || it.type == MediaType.Gif || (it.type == MediaType.Video && isHighConfidenceVideoUrl(it.url))) {
+                result[it.url] = it
+            }
+        }
+    }
+    return result.values.toList()
+}
+
+private fun extractJsonDocuments(text: String): List<String> {
+    val docs = mutableListOf<String>()
+    Regex("""<script[^>]*id=["']RENDER_DATA["'][^>]*>(.*?)</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(text)
+        .forEach { match ->
+            val encoded = match.groupValues[1].trim()
+            runCatching { URLDecoder.decode(encoded, "UTF-8") }.getOrNull()?.let { docs += it.deepUnescape() }
+        }
+    Regex("""<script[^>]*id=["']__UNIVERSAL_DATA_FOR_REHYDRATION__["'][^>]*>(.*?)</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(text)
+        .forEach { docs += it.groupValues[1].trim().deepUnescape() }
+    Regex("""window\.__INITIAL_STATE__\s*=\s*(\{.*?})\s*</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(text)
+        .forEach { docs += it.groupValues[1].trim().deepUnescape() }
+    val trimmed = text.trim()
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) docs += trimmed.deepUnescape()
+    return docs.distinct().take(10)
+}
+
+private fun collectDouyinFromJson(value: Any?, source: String, result: MutableMap<String, ExtractedMediaUrl>) {
+    when (value) {
+        is JSONObject -> {
+            val names = value.names()
+            if (names != null) {
+                for (index in 0 until names.length()) {
+                    val key = names.optString(index)
+                    val child = value.opt(key)
+                    when {
+                        key.equals("video", ignoreCase = true) && child is JSONObject -> collectDouyinVideoObject(child, source, result)
+                        key.equals("music", ignoreCase = true) && child is JSONObject -> collectDouyinAudioObject(child, source, result)
+                        key.equals("images", ignoreCase = true) && child is JSONArray -> collectDouyinImages(child, source, result)
+                        key.contains("cover", ignoreCase = true) -> extractJsonUrls(child).forEach { url ->
+                            val normalized = url.normalizeMediaUrl()
+                            if (looksLikeCoverUrl(normalized)) result[normalized] = ExtractedMediaUrl(normalized, classifyImageOrGif(normalized), source)
+                        }
+                    }
+                    collectDouyinFromJson(child, source, result)
+                }
+            }
+        }
+        is JSONArray -> {
+            for (index in 0 until value.length()) collectDouyinFromJson(value.opt(index), source, result)
+        }
+    }
+}
+
+private fun collectDouyinVideoObject(video: JSONObject, source: String, result: MutableMap<String, ExtractedMediaUrl>) {
+    val cover = firstJsonUrl(video.opt("cover")).ifBlank {
+        firstJsonUrl(video.opt("origin_cover")).ifBlank {
+            firstJsonUrl(video.opt("dynamic_cover")).ifBlank { firstJsonUrl(video.opt("animated_cover")) }
+        }
+    }.normalizeMediaUrl()
+    listOf("download_addr", "play_addr", "play_addr_h264", "play_addr_265", "bit_rate").forEach { key ->
+        val child = video.opt(key)
+        if (key == "bit_rate" && child is JSONArray) {
+            for (index in 0 until child.length()) {
+                val bitrateObject = child.optJSONObject(index)
+                listOf("play_addr", "play_addr_265", "play_addr_h264").forEach { addressKey ->
+                    extractJsonUrls(bitrateObject?.opt(addressKey)).forEach { addVideoUrl(it, source, cover, result) }
+                }
+            }
+        } else {
+            extractJsonUrls(child).forEach { addVideoUrl(it, source, cover, result) }
+        }
+    }
+}
+
+private fun collectDouyinAudioObject(music: JSONObject, source: String, result: MutableMap<String, ExtractedMediaUrl>) {
+    listOf("play_url", "download_url").forEach { key ->
+        extractJsonUrls(music.opt(key)).forEach { raw ->
+            val url = raw.normalizeMediaUrl()
+            if (url.startsWith("http")) result[url] = ExtractedMediaUrl(url, MediaType.Audio, source)
+        }
+    }
+}
+
+private fun collectDouyinImages(images: JSONArray, source: String, result: MutableMap<String, ExtractedMediaUrl>) {
+    for (index in 0 until images.length()) {
+        val image = images.optJSONObject(index) ?: continue
+        listOf("display_image", "download_url", "url", "image", "origin_image").forEach { key ->
+            extractJsonUrls(image.opt(key)).forEach { raw ->
+                val url = raw.normalizeMediaUrl()
+                if (url.startsWith("http")) result[url] = ExtractedMediaUrl(url, classifyImageOrGif(url), source)
+            }
+        }
+    }
+}
+
+private fun addVideoUrl(raw: String, source: String, cover: String, result: MutableMap<String, ExtractedMediaUrl>) {
+    val url = raw.normalizeMediaUrl()
+    if (url.startsWith("http") && !looksLikeAudioUrl(url) && isHighConfidenceVideoUrl(url)) {
+        result[url] = ExtractedMediaUrl(url, MediaType.Video, source, coverUrl = cover)
+    }
+}
+
+private fun extractJsonUrls(value: Any?): List<String> {
+    val urls = mutableListOf<String>()
+    when (value) {
+        is JSONObject -> {
+            value.optJSONArray("url_list")?.let { array ->
+                for (index in 0 until array.length()) array.optString(index).takeIf { it.startsWith("http") }?.let { urls += it }
+            }
+            value.optString("url").takeIf { it.startsWith("http") }?.let { urls += it }
+            value.optString("uri").takeIf { it.startsWith("http") }?.let { urls += it }
+            val names = value.names()
+            if (names != null) {
+                for (index in 0 until names.length()) {
+                    val key = names.optString(index)
+                    if (key.contains("url", ignoreCase = true) || key.contains("addr", ignoreCase = true) || key.contains("cover", ignoreCase = true)) {
+                        urls += extractJsonUrls(value.opt(key))
+                    }
+                }
+            }
+        }
+        is JSONArray -> {
+            for (index in 0 until value.length()) urls += extractJsonUrls(value.opt(index))
+        }
+        is String -> if (value.startsWith("http")) urls += value
+    }
+    return urls.map { it.normalizeMediaUrl() }.distinct()
+}
+
+private fun firstJsonUrl(value: Any?): String = extractJsonUrls(value).firstOrNull().orEmpty()
 
 private fun extractDouyinMediaCandidates(text: String, source: String): List<ExtractedMediaUrl> {
     val result = linkedMapOf<String, ExtractedMediaUrl>()
@@ -819,6 +973,21 @@ private fun looksLikeDouyinVideoUrl(url: String): Boolean {
         clean.contains("playwm") ||
         clean.contains("/play/") ||
         clean.endsWith(".mp4")
+}
+
+private fun isHighConfidenceVideoUrl(url: String): Boolean {
+    val clean = url.lowercase(Locale.US)
+    return !looksLikeAudioUrl(clean) && (
+        clean.contains("mime_type=video") ||
+            clean.contains("douyinvod") ||
+            clean.contains("/video/tos/") ||
+            clean.contains("video_id=") ||
+            clean.contains("playwm") ||
+            clean.contains("/play/") ||
+            clean.endsWith(".mp4") ||
+            clean.endsWith(".mov") ||
+            clean.endsWith(".webm")
+        )
 }
 
 private fun htmlTitle(html: String): String = metaContent(html, "og:title").ifBlank {
@@ -1066,6 +1235,6 @@ const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 
-private const val CURRENT_VERSION_NAME = "1.25"
-private const val CURRENT_VERSION_CODE = 12500
+private const val CURRENT_VERSION_NAME = "1.26"
+private const val CURRENT_VERSION_CODE = 12600
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"

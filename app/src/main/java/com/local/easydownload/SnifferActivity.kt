@@ -141,7 +141,11 @@ class SnifferActivity : ComponentActivity() {
     private fun recordCandidate(url: String, accept: String, source: String) {
         if (url.startsWith("data:", ignoreCase = true) || url.length < 12) return
         val type = classifyMedia(url, accept)
-        val keep = type != MediaType.Web && type != MediaType.Other || shouldKeepCandidate(url)
+        val keep = type == MediaType.Video ||
+            type == MediaType.Image ||
+            type == MediaType.Gif ||
+            type == MediaType.Audio ||
+            type == MediaType.Playlist
         if (!keep) return
         synchronized(sniffed) {
             if (sniffed.none { it.url == url }) {

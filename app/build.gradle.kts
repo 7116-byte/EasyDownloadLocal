@@ -12,8 +12,8 @@ android {
         applicationId = "com.local.easydownload"
         minSdk = 26
         targetSdk = 35
-        versionCode = 125
-        versionName = "1.25"
+        versionCode = 126
+        versionName = "1.26"
     }
 
     buildFeatures {
