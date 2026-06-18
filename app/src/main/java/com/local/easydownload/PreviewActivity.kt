@@ -14,6 +14,7 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -27,6 +28,7 @@ import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.net.URL
 
@@ -34,6 +36,7 @@ class PreviewActivity : ComponentActivity() {
     private var player: ExoPlayer? = null
     private val url: String by lazy { intent.getStringExtra(EXTRA_URL).orEmpty() }
     private val titleText: String by lazy { intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "媒体预览" } }
+    private val sizeText: String by lazy { intent.getStringExtra(EXTRA_SIZE).orEmpty() }
     private val mediaType: MediaType by lazy {
         runCatching { MediaType.valueOf(intent.getStringExtra(EXTRA_MEDIA_TYPE).orEmpty()) }.getOrDefault(MediaType.Other)
     }
@@ -74,12 +77,21 @@ class PreviewActivity : ComponentActivity() {
                 text = "返回"
                 setOnClickListener { finish() }
             })
-            addView(TextView(this@PreviewActivity).apply {
-                text = titleText
-                setTextColor(Color.WHITE)
-                textSize = 16f
-                maxLines = 2
+            addView(LinearLayout(this@PreviewActivity).apply {
+                orientation = LinearLayout.VERTICAL
                 setPadding(12, 0, 0, 0)
+                addView(TextView(this@PreviewActivity).apply {
+                    text = titleText
+                    setTextColor(Color.WHITE)
+                    textSize = 15f
+                    maxLines = 2
+                })
+                addView(TextView(this@PreviewActivity).apply {
+                    text = listOf(mediaType.label, sizeText).filter { it.isNotBlank() }.joinToString(" · ")
+                    setTextColor(0xFFB0BEC5.toInt())
+                    textSize = 12f
+                    maxLines = 1
+                })
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(Button(this@PreviewActivity).apply {
                 text = "浏览器"
@@ -102,6 +114,7 @@ class PreviewActivity : ComponentActivity() {
             setBackgroundColor(Color.BLACK)
             useController = true
             controllerShowTimeoutMs = 5000
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
         container.addView(playerView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         container.addView(fallback, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
@@ -143,18 +156,14 @@ class PreviewActivity : ComponentActivity() {
     }
 
     private fun buildImagePreview(): View {
-        return WebView(this).apply {
+        return FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            webChromeClient = WebChromeClient()
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
-            }
-            settings.builtInZoomControls = true
-            settings.displayZoomControls = false
-            settings.loadWithOverviewMode = true
-            settings.useWideViewPort = true
-            settings.javaScriptEnabled = true
-            loadUrl(this@PreviewActivity.url, mediaHeaders(this@PreviewActivity.url))
+            addView(ImageView(this@PreviewActivity).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
+                setBackgroundColor(Color.BLACK)
+                loadThumbnailInto(this, this@PreviewActivity.url)
+            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         }
     }
 
@@ -202,7 +211,7 @@ class PreviewActivity : ComponentActivity() {
             setPadding(10, 10, 10, 14)
         }
         row.addAction("下载") {
-            enqueueMediaDownload(this, MediaItem(url = url, type = mediaType, title = titleText, source = "预览页"))
+            enqueueMediaDownload(this, MediaItem(url = url, type = mediaType, title = titleText, source = "预览页", size = sizeText))
             toast(this, "已加入下载任务")
         }
         row.addAction("复制链接") { copyText(this, url) }

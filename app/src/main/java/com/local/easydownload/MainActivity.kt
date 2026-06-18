@@ -139,7 +139,10 @@ private data class ExtractedMediaUrl(
     val url: String,
     val type: MediaType,
     val source: String,
-    val coverUrl: String = ""
+    val coverUrl: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    val byteSize: Long = 0L
 )
 
 private val AppColors = lightColorScheme(
@@ -398,6 +401,11 @@ private fun MediaTile(item: MediaItem, onToggle: () -> Unit, onPreview: () -> Un
             Box(Modifier.align(Alignment.TopStart).background(Color(0xAA000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
                 Text("${typeIcon(item.type)} ${item.type.label}", color = Color.White, fontWeight = FontWeight.Bold)
             }
+            if (item.size.isNotBlank()) {
+                Box(Modifier.align(Alignment.BottomStart).background(Color(0xAA000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                    Text(item.size, color = Color.White)
+                }
+            }
         } else {
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text(typeIcon(item.type), style = MaterialTheme.typography.headlineSmall)
@@ -548,12 +556,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.29")
+            Text("版本 1.30")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.29", color = Color(0xFF667085))
+            Text("当前版本：1.30", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -733,16 +741,20 @@ private fun buildDouyinItems(html: String, finalUrl: String, title: String): Lis
     }
     val fallbackCover = sources.values.firstOrNull { it.type == MediaType.Image && looksLikeCoverUrl(it.url) }?.url
         ?: sources.values.firstOrNull { it.type == MediaType.Image }?.url.orEmpty()
+    val hasVideo = sources.values.any { it.type == MediaType.Video && isHighConfidenceVideoUrl(it.url) }
     return sources.values
         .filter { it.type != MediaType.Web && it.type != MediaType.Other }
         .filterNot { it.type == MediaType.Video && looksLikeAudioUrl(it.url) }
         .filterNot { it.type == MediaType.Video && !isHighConfidenceVideoUrl(it.url) }
+        .filterNot { hasVideo && (it.type == MediaType.Image || it.type == MediaType.Gif) }
+        .filterNot { !hasVideo && (it.type == MediaType.Image || it.type == MediaType.Gif) && !it.source.contains("图文") }
         .map { extracted ->
             MediaItem(
                 url = extracted.url,
                 type = extracted.type,
                 title = title,
                 source = extracted.source,
+                size = extracted.mediaInfoText(),
                 coverUrl = when {
                     extracted.type == MediaType.Image || extracted.type == MediaType.Gif -> extracted.url
                     extracted.coverUrl.isNotBlank() -> extracted.coverUrl
@@ -894,17 +906,22 @@ private fun collectDouyinVideoObject(video: JSONObject, source: String, result: 
             firstJsonUrl(video.opt("dynamic_cover")).ifBlank { firstJsonUrl(video.opt("animated_cover")) }
         }
     }.normalizeMediaUrl()
+    val width = video.optInt("width", 0)
+    val height = video.optInt("height", 0)
     listOf("download_addr", "play_addr", "play_addr_h264", "play_addr_265", "bit_rate").forEach { key ->
         val child = video.opt(key)
         if (key == "bit_rate" && child is JSONArray) {
             for (index in 0 until child.length()) {
                 val bitrateObject = child.optJSONObject(index)
                 listOf("play_addr", "play_addr_265", "play_addr_h264").forEach { addressKey ->
-                    extractJsonUrls(bitrateObject?.opt(addressKey)).forEach { addVideoUrl(it, source, cover, result) }
+                    val address = bitrateObject?.opt(addressKey)
+                    val dataSize = extractDataSize(address).takeIf { it > 0 } ?: bitrateObject?.optLong("data_size", 0L).orZero()
+                    extractJsonUrls(address).forEach { addVideoUrl(it, source, cover, result, width, height, dataSize) }
                 }
             }
         } else {
-            extractJsonUrls(child).forEach { addVideoUrl(it, source, cover, result) }
+            val dataSize = extractDataSize(child)
+            extractJsonUrls(child).forEach { addVideoUrl(it, source, cover, result, width, height, dataSize) }
         }
     }
 }
@@ -921,19 +938,23 @@ private fun collectDouyinAudioObject(music: JSONObject, source: String, result: 
 private fun collectDouyinImages(images: JSONArray, source: String, result: MutableMap<String, ExtractedMediaUrl>) {
     for (index in 0 until images.length()) {
         val image = images.optJSONObject(index) ?: continue
+        val width = image.optInt("width", 0)
+        val height = image.optInt("height", 0)
         listOf("display_image", "download_url", "url", "image", "origin_image").forEach { key ->
             extractJsonUrls(image.opt(key)).forEach { raw ->
                 val url = raw.normalizeMediaUrl()
-                if (url.startsWith("http")) result[url] = ExtractedMediaUrl(url, classifyImageOrGif(url), source)
+                if (url.startsWith("http") && isRelevantDouyinImageUrl(url)) {
+                    result[url] = ExtractedMediaUrl(url, classifyImageOrGif(url), "$source 图文", width = width, height = height)
+                }
             }
         }
     }
 }
 
-private fun addVideoUrl(raw: String, source: String, cover: String, result: MutableMap<String, ExtractedMediaUrl>) {
+private fun addVideoUrl(raw: String, source: String, cover: String, result: MutableMap<String, ExtractedMediaUrl>, width: Int = 0, height: Int = 0, byteSize: Long = 0L) {
     val url = raw.normalizeMediaUrl()
     if (url.startsWith("http") && !looksLikeAudioUrl(url) && isHighConfidenceVideoUrl(url)) {
-        result[url] = ExtractedMediaUrl(url, MediaType.Video, source, coverUrl = cover)
+        result[url] = ExtractedMediaUrl(url, MediaType.Video, source, coverUrl = cover, width = width, height = height, byteSize = byteSize)
     }
 }
 
@@ -941,11 +962,8 @@ private fun List<MediaItem>.collapseDuplicateDouyinVideos(): List<MediaItem> {
     val videos = filter { it.type == MediaType.Video }
     if (videos.size <= 1) return this
     val nonVideos = filterNot { it.type == MediaType.Video }
-    val groupedVideos = videos
-        .groupBy { it.coverUrl.ifBlank { it.title.ifBlank { "douyin-video" } } }
-        .values
-        .map { group -> group.maxByOrNull { videoQualityScore(it.url, it.source) } ?: group.first() }
-    return (groupedVideos + nonVideos).sortedBy { mediaRank(it.type) }
+    val bestVideo = videos.maxByOrNull { videoQualityScore(it.url, it.source) } ?: videos.first()
+    return (listOf(bestVideo) + nonVideos).sortedBy { mediaRank(it.type) }
 }
 
 private fun videoQualityScore(url: String, source: String): Int {
@@ -961,6 +979,52 @@ private fun videoQualityScore(url: String, source: String): Int {
     if (clean.contains("watermark")) score -= 20
     if (looksLikeAudioUrl(clean)) score -= 1000
     return score
+}
+
+private fun ExtractedMediaUrl.mediaInfoText(): String {
+    val parts = mutableListOf<String>()
+    if (width > 0 && height > 0) parts += "${width}x${height}"
+    if (byteSize > 0) parts += formatBytes(byteSize)
+    return parts.joinToString(" · ")
+}
+
+fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return ""
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1 -> String.format(Locale.US, "%.2f GB", gb)
+        mb >= 1 -> String.format(Locale.US, "%.1f MB", mb)
+        kb >= 1 -> String.format(Locale.US, "%.0f KB", kb)
+        else -> "$bytes B"
+    }
+}
+
+private fun extractDataSize(value: Any?): Long {
+    return when (value) {
+        is JSONObject -> value.optLong("data_size", 0L).takeIf { it > 0 }
+            ?: value.optLong("size", 0L).takeIf { it > 0 }
+            ?: value.optLong("file_size", 0L).takeIf { it > 0 }
+            ?: 0L
+        else -> 0L
+    }
+}
+
+private fun Long?.orZero(): Long = this ?: 0L
+
+private fun isRelevantDouyinImageUrl(url: String): Boolean {
+    val clean = url.lowercase(Locale.US)
+    if (!looksLikeCoverUrl(clean)) return false
+    val noisy = listOf("avatar", "head", "profile", "user", "emoji", "sticker", "icon", "logo", "comment", "follow", "share")
+    if (noisy.any { clean.contains(it) }) return false
+    return clean.contains("byteimg") ||
+        clean.contains("imagex") ||
+        clean.contains("tos-cn-i") ||
+        clean.endsWith(".jpg") ||
+        clean.endsWith(".jpeg") ||
+        clean.endsWith(".png") ||
+        clean.endsWith(".webp")
 }
 
 private fun extractJsonUrls(value: Any?): List<String> {
@@ -1186,6 +1250,7 @@ fun openPreview(context: Context, item: MediaItem) {
         putExtra(EXTRA_URL, item.url)
         putExtra(EXTRA_MEDIA_TYPE, item.type.name)
         putExtra(EXTRA_TITLE, item.title.ifBlank { item.fileName })
+        putExtra(EXTRA_SIZE, item.size)
     })
 }
 
@@ -1310,7 +1375,8 @@ const val EXTRA_PARSE_TEXT = "com.local.easydownload.PARSE_TEXT"
 const val EXTRA_URL = "com.local.easydownload.URL"
 const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
+const val EXTRA_SIZE = "com.local.easydownload.SIZE"
 
-private const val CURRENT_VERSION_NAME = "1.29"
-private const val CURRENT_VERSION_CODE = 12900
+private const val CURRENT_VERSION_NAME = "1.30"
+private const val CURRENT_VERSION_CODE = 13000
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
