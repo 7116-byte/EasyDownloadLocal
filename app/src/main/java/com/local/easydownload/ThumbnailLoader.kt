@@ -2,7 +2,6 @@ package com.local.easydownload
 
 import android.graphics.BitmapFactory
 import android.widget.ImageView
-import java.net.URL
 
 fun loadThumbnailInto(imageView: ImageView, url: String) {
     if (url.isBlank()) {
@@ -13,11 +12,9 @@ fun loadThumbnailInto(imageView: ImageView, url: String) {
     imageView.setBackgroundColor(0xFFEFF3F6.toInt())
     Thread {
         val bitmap = runCatching {
-            URL(url).openConnection().apply {
-                connectTimeout = 10000
-                readTimeout = 12000
-                mediaHeaders(url).forEach { (key, value) -> setRequestProperty(key, value) }
-            }.getInputStream().use { stream -> BitmapFactory.decodeStream(stream) }
+            val type = classifyMedia(url).takeIf { it == MediaType.Image || it == MediaType.Gif } ?: MediaType.Image
+            val file = AppDownloader.downloadToCacheIfNeeded(imageView.context.applicationContext, MediaItem(url = url, type = type))
+            BitmapFactory.decodeFile(file.absolutePath)
         }.getOrNull()
         imageView.post {
             if (imageView.tag == url && bitmap != null) {

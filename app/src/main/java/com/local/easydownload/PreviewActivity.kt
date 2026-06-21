@@ -110,6 +110,7 @@ class PreviewActivity : ComponentActivity() {
     private fun buildVideoPreview(): View {
         val container = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val fallback = buildFallbackPreview().apply { visibility = View.GONE }
+        AppDownloader.prefetch(this, MediaItem(url = url, type = mediaType, title = titleText, source = "preview", size = sizeText))
         val playerView = PlayerView(this).apply {
             setBackgroundColor(Color.BLACK)
             useController = true
@@ -141,13 +142,15 @@ class PreviewActivity : ComponentActivity() {
     }
 
     private fun buildMediaSource(sourceUrl: String): MediaSource {
+        val cachedFile = AppDownloader.cachedFileIfPresent(this, sourceUrl, mediaType)
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(PREVIEW_UA)
             .setDefaultRequestProperties(mediaHeaders(sourceUrl))
             .setAllowCrossProtocolRedirects(true)
         val dataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
-        val mediaItem = PlayerMediaItem.fromUri(Uri.parse(sourceUrl))
-        val clean = sourceUrl.substringBefore("?").lowercase()
+        val mediaUri = cachedFile?.let { Uri.fromFile(it) } ?: Uri.parse(sourceUrl)
+        val mediaItem = PlayerMediaItem.fromUri(mediaUri)
+        val clean = (cachedFile?.name ?: sourceUrl.substringBefore("?")).lowercase()
         return when {
             clean.endsWith(".m3u8") -> HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
             clean.endsWith(".mpd") -> DashMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)

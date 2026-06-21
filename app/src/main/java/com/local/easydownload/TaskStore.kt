@@ -36,6 +36,22 @@ object TaskStore {
         save(context, next)
     }
 
+    fun update(context: Context, url: String, status: String, progress: Int, localPath: String = "", speed: String = "") {
+        val next = load(context).map { item ->
+            if (item.url == url) {
+                item.copy(
+                    status = status,
+                    progress = progress,
+                    localPath = localPath.ifBlank { item.localPath },
+                    speed = speed.ifBlank { item.speed }
+                )
+            } else {
+                item
+            }
+        }
+        save(context, next)
+    }
+
     fun clear(context: Context) {
         save(context, emptyList())
     }

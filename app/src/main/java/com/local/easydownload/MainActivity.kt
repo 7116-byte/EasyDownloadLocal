@@ -1,13 +1,11 @@
 package com.local.easydownload
 
-import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
 import android.provider.Settings
 import android.widget.ImageView
 import android.widget.Toast
@@ -606,12 +604,12 @@ private fun MineScreen() {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         SectionCard {
             Text("便捷下载本地版", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("版本 1.31")
+            Text("版本 1.32")
             Text("原版解析/预览工作流复刻：解析、嗅探、预览、选择下载、任务列表。")
         }
         SectionCard {
             Text("检查更新", fontWeight = FontWeight.Bold)
-            Text("当前版本：1.31", color = Color(0xFF667085))
+            Text("当前版本：1.32", color = Color(0xFF667085))
             updateInfo?.let {
                 Spacer(Modifier.height(6.dp))
                 when {
@@ -792,13 +790,13 @@ private fun buildDouyinItems(html: String, finalUrl: String, title: String): Lis
     val fallbackCover = sources.values.firstOrNull { it.type == MediaType.Image && looksLikeCoverUrl(it.url) }?.url
         ?: sources.values.firstOrNull { it.type == MediaType.Image }?.url.orEmpty()
     val hasVideo = sources.values.any { it.type == MediaType.Video && isHighConfidenceVideoUrl(it.url) }
-    return sources.values
+    val selectedSources = selectBestDouyinVideos(sources.values
         .filter { it.type != MediaType.Web && it.type != MediaType.Other }
         .filterNot { it.type == MediaType.Video && looksLikeAudioUrl(it.url) }
         .filterNot { it.type == MediaType.Video && !isHighConfidenceVideoUrl(it.url) }
         .filterNot { hasVideo && (it.type == MediaType.Image || it.type == MediaType.Gif) }
-        .filterNot { !hasVideo && (it.type == MediaType.Image || it.type == MediaType.Gif) && !it.source.contains("图文") }
-        .map { extracted ->
+        .filterNot { !hasVideo && (it.type == MediaType.Image || it.type == MediaType.Gif) && !it.source.contains("图文") })
+    return selectedSources.map { extracted ->
             MediaItem(
                 url = extracted.url,
                 type = extracted.type,
@@ -814,7 +812,6 @@ private fun buildDouyinItems(html: String, finalUrl: String, title: String): Lis
             )
         }
         .distinctBy { it.url }
-        .collapseDuplicateDouyinVideos()
         .take(30)
 }
 
@@ -1006,6 +1003,32 @@ private fun addVideoUrl(raw: String, source: String, cover: String, result: Muta
     if (url.startsWith("http") && !looksLikeAudioUrl(url) && isHighConfidenceVideoUrl(url)) {
         result[url] = ExtractedMediaUrl(url, MediaType.Video, source, coverUrl = cover, width = width, height = height, byteSize = byteSize)
     }
+}
+
+private fun selectBestDouyinVideos(items: List<ExtractedMediaUrl>): List<ExtractedMediaUrl> {
+    val videos = items.filter { it.type == MediaType.Video }
+    if (videos.size <= 1) return items.sortedBy { mediaRank(it.type) }
+    val bestVideo = videos.maxByOrNull { videoQualityScore(it) } ?: videos.first()
+    return (listOf(bestVideo) + items.filterNot { it.type == MediaType.Video })
+        .distinctBy { it.url }
+        .sortedBy { mediaRank(it.type) }
+}
+
+private fun videoQualityScore(item: ExtractedMediaUrl): Long {
+    val clean = item.url.lowercase(Locale.US)
+    var score = 0L
+    if (item.width > 0 && item.height > 0) score += item.width.toLong() * item.height.toLong()
+    if (item.byteSize > 0L) score += (item.byteSize / 1024L).coerceAtMost(300_000L)
+    if (item.source.contains("详情接口")) score += 80_000L
+    if (clean.contains("download")) score += 60_000L
+    if (clean.contains("play_addr")) score += 40_000L
+    if (clean.contains("mime_type=video")) score += 30_000L
+    if (clean.contains("ratio=1080p") || clean.contains("1080")) score += 20_000L
+    if (clean.contains("720")) score += 10_000L
+    if (clean.contains("playwm")) score -= 60_000L
+    if (clean.contains("watermark")) score -= 60_000L
+    if (looksLikeAudioUrl(clean)) score -= 1_000_000L
+    return score
 }
 
 private fun List<MediaItem>.collapseDuplicateDouyinVideos(): List<MediaItem> {
@@ -1265,27 +1288,9 @@ private fun mediaRank(type: MediaType): Int = when (type) {
 }
 
 fun enqueueMediaDownload(context: Context, item: MediaItem) {
-    val task = if (item.type == MediaType.Playlist) {
-        item.copy(status = "播放列表待处理", progress = 0, speed = "m3u8")
-    } else {
-        val id = runCatching {
-            val outputName = item.fileName.safeFileName()
-            val request = DownloadManager.Request(Uri.parse(item.url))
-                .setTitle(outputName)
-                .setDescription(item.url)
-                .setMimeType(mimeTypeFor(item.type))
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, outputName)
-            mediaHeaders(item.url).forEach { (key, value) -> request.addRequestHeader(key, value) }
-            context.getSystemService(DownloadManager::class.java).enqueue(request)
-        }.getOrNull()
-        item.copy(
-            status = if (id == null) "加入失败" else "下载中",
-            progress = if (id == null) 0 else 5,
-            speed = if (id == null) "" else "系统下载器"
-        )
-    }
+    val task = item.copy(status = "保存中", progress = 3, speed = "应用下载器")
     TaskStore.add(context, task)
+    AppDownloader.enqueue(context, item)
 }
 
 suspend fun resolveDownloadItems(context: Context, text: String): List<MediaItem> {
@@ -1454,6 +1459,6 @@ const val EXTRA_MEDIA_TYPE = "com.local.easydownload.MEDIA_TYPE"
 const val EXTRA_TITLE = "com.local.easydownload.TITLE"
 const val EXTRA_SIZE = "com.local.easydownload.SIZE"
 
-private const val CURRENT_VERSION_NAME = "1.31"
-private const val CURRENT_VERSION_CODE = 13100
+private const val CURRENT_VERSION_NAME = "1.32"
+private const val CURRENT_VERSION_CODE = 13200
 private const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36"
